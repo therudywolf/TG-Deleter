@@ -1,0 +1,11 @@
+{
+  "api_id": null,
+  "api_hash": "",
+  "scan_limit": null,
+  "delay_sec": 0.2,
+  "scan_delay_between_chats": 2.0,
+  "chat_id_cli": null,
+  "scan_include_groups": true,
+  "scan_include_channels": true,
+  "scan_include_private": true
+}

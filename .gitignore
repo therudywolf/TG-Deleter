@@ -1,0 +1,13 @@
+.env
+config.json
+api_config.json
+build/
+dist/
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+scan_cache.json
+scan_cache_*.json
+temp/
+venv/
