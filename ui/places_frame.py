@@ -27,11 +27,12 @@ from ui.tooltip import bind_tooltip
 class PlacesFrame(ctk.CTkFrame):
     """Экран 1: Чаты с вашими сообщениями — скан, фильтры, пауза, карточки чатов, сортировка, поиск."""
 
-    def __init__(self, parent, on_open_place, on_start_scan=None, on_refresh_cache=None, **kw):
+    def __init__(self, parent, on_open_place, on_start_scan=None, on_refresh_cache=None, on_export_places=None, **kw):
         super().__init__(parent, fg_color="transparent", **kw)
         self.on_open_place = on_open_place
         self.on_start_scan = on_start_scan
         self.on_refresh_cache = on_refresh_cache
+        self.on_export_places = on_export_places
         self.places: list = []
         self._scanning = False
         self._paused = False
@@ -109,6 +110,11 @@ class PlacesFrame(ctk.CTkFrame):
             actions_row, text="Экспорт JSON", command=self._export_json,
             corner_radius=BTN_RADIUS, width=100, height=36, fg_color=BTN_SECONDARY
         ).pack(side="right", padx=PAD_SM)
+        self.export_chats_btn = ctk.CTkButton(
+            actions_row, text="Экспорт выбранных", command=self._export_selected_places,
+            corner_radius=BTN_RADIUS, width=150, height=36, fg_color=BTN_SECONDARY
+        )
+        self.export_chats_btn.pack(side="right", padx=PAD_SM)
 
         self.status_label = ctk.CTkLabel(self, text="Здесь появятся чаты с вашими сообщениями. Нажмите «Сканировать» или «Обновить из кэша».", text_color="gray")
         self.status_label.pack(fill="x", pady=(0, PAD_SM))
@@ -178,16 +184,10 @@ class PlacesFrame(ctk.CTkFrame):
             return
         if self.on_start_scan:
             self.on_start_scan()
-        self._scanning = True
-        self._paused = False
         scan_paused.clear()
         scan_stop_requested.clear()
-        self.scan_btn.configure(state="disabled")
-        self.pause_btn.configure(state="normal", text="Пауза")
-        self.stop_btn.configure(state="normal")
+        self.set_scanning(True, label="Сканирую")
         self.status_label.configure(text="Сканирую диалоги…")
-        self.progress.pack(fill="x", pady=(0, PAD))
-        self.progress.start()
         depth_val = None
         for label, val in self.depth_options:
             if self.depth_var.get() == label:
@@ -220,23 +220,42 @@ class PlacesFrame(ctk.CTkFrame):
             scan_paused.clear()
             self._paused = False
             self.pause_btn.configure(text="Пауза")
+            self.status_label.configure(text="Продолжаю операцию...")
         else:
             scan_paused.set()
             self._paused = True
             self.pause_btn.configure(text="Продолжить")
+            self.status_label.configure(text="Пауза. Нажмите «Продолжить» для возобновления.")
 
     def _stop_scan(self):
         if not self._scanning:
             return
         scan_stop_requested.set()
-
-    def set_scanning(self, scanning: bool):
-        self._scanning = scanning
-        self.scan_btn.configure(state="normal" if not scanning else "disabled")
-        self.pause_btn.configure(state="disabled")
+        scan_paused.clear()
         self.stop_btn.configure(state="disabled")
-        self.progress.stop()
-        self.progress.pack_forget()
+        self.pause_btn.configure(state="disabled")
+        self.status_label.configure(text="Останавливаю операцию...")
+
+    def set_scanning(self, scanning: bool, label: str | None = None):
+        self._scanning = scanning
+        self._paused = False
+        if scanning:
+            self.scan_btn.configure(state="disabled", text=label or "Выполняется")
+            self.pause_btn.configure(state="normal", text="Пауза")
+            self.stop_btn.configure(state="normal")
+            self.export_chats_btn.configure(state="disabled")
+            self.delete_batch_btn.configure(state="disabled")
+            self.progress.pack(fill="x", pady=(0, PAD))
+            self.progress.start()
+        else:
+            scan_paused.clear()
+            self.scan_btn.configure(state="normal", text="Сканировать")
+            self.pause_btn.configure(state="disabled", text="Пауза")
+            self.stop_btn.configure(state="disabled")
+            self.export_chats_btn.configure(state="normal")
+            self.delete_batch_btn.configure(state="normal")
+            self.progress.stop()
+            self.progress.pack_forget()
 
     def set_places(self, places):
         self.places = list(places)
@@ -252,15 +271,31 @@ class PlacesFrame(ctk.CTkFrame):
         var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(row, text="", variable=var, width=24, height=24).pack(side="left", padx=(0, PAD_SM))
         title_short = (place.title[:50] + "…") if len(place.title) > 50 else place.title
+        text_col = ctk.CTkFrame(row, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
         label_text = f"{title_short}  ·  {place.type_str}  ·  {len(place.messages)} сообщ."
-        lbl = ctk.CTkLabel(row, text=label_text, anchor="w", font=font(14))
-        lbl.pack(side="left", fill="x", expand=True)
+        lbl = ctk.CTkLabel(text_col, text=label_text, anchor="w", font=font(14, "bold"))
+        lbl.pack(fill="x", anchor="w")
+        if place.messages:
+            mid, preview, date_str = place.messages[0]
+            preview = (preview or "").replace("\n", " ")
+            preview_short = preview[:90] + "…" if len(preview) > 90 else preview
+            sub = ctk.CTkLabel(
+                text_col,
+                text=f"{date_str} · #{mid} · {preview_short}",
+                anchor="w",
+                font=font(12),
+                text_color="gray",
+                wraplength=560,
+            )
+            sub.pack(fill="x", anchor="w", pady=(2, 0))
         card.place_data = place
         card.place_var = var
         card.bind("<Double-1>", lambda e, pl=place: self.on_open_place(pl))
         lbl.bind("<Double-1>", lambda e, pl=place: self.on_open_place(pl))
         card.bind("<Button-1>", self._select_card)
         lbl.bind("<Button-1>", self._select_card)
+        text_col.bind("<Button-1>", self._select_card)
         return card
 
     def append_place(self, place: Place):
@@ -312,22 +347,43 @@ class PlacesFrame(ctk.CTkFrame):
         ctk.CTkLabel(empty, text=msg, font=font(14), text_color="gray", justify="center").pack(expand=True)
 
     def _delete_in_selected_places(self):
-        selected = []
-        for card in self.scroll.winfo_children():
-            if getattr(card, "place_data", None) and getattr(card, "place_var", None) and card.place_var.get():
-                selected.append(card.place_data.chat_id)
+        selected = self._selected_chat_ids()
         if not selected:
             messagebox.showinfo("Удаление", "Отметьте чаты для удаления (галочка на карточке).")
             return
         if not messagebox.askyesno("Подтверждение", f"Удалить все ваши сообщения в {len(selected)} выбранных чатах? (обход по ходу, без предварительного списка). Продолжить?"):
             return
+        scan_paused.clear()
+        scan_stop_requested.clear()
         request_queue.put(("delete_in_places", selected))
+
+    def _selected_chat_ids(self):
+        selected = []
+        for card in self.scroll.winfo_children():
+            if getattr(card, "place_data", None) and getattr(card, "place_var", None) and card.place_var.get():
+                selected.append(card.place_data.chat_id)
+        return selected
+
+    def _export_selected_places(self):
+        selected = self._selected_chat_ids()
+        if not selected:
+            messagebox.showinfo("Экспорт", "Отметьте чаты для экспорта (галочка на карточке).")
+            return
+        if not self.on_export_places:
+            return
+        folder = filedialog.askdirectory(title="Папка для экспорта")
+        if folder:
+            self.on_export_places(folder, selected)
 
     def _select_card(self, event):
         w = event.widget
         while w and not getattr(w, "place_data", None):
             w = w.master if hasattr(w, "master") else None
         if w is not None:
+            if getattr(self, "_selected_card", None) is not None and self._selected_card.winfo_exists():
+                self._selected_card.configure(fg_color=CARD_BG)
+            w.configure(fg_color=("gray75", "gray28"))
+            self._selected_card = w
             self._selected_place = w.place_data
 
     def _open_selected(self):

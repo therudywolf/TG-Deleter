@@ -21,9 +21,9 @@ def cache_path(session: Optional[str] = None) -> str:
     return os.path.join(_PROJECT_ROOT, f"scan_cache_{session}.json")
 
 
-def load_places_from_cache() -> Optional[List[Place]]:
+def load_places_from_cache(session: Optional[str] = None) -> Optional[List[Place]]:
     """Загружает список чатов из кэша. При ошибке возвращает None."""
-    path = cache_path()
+    path = cache_path(session)
     if not os.path.isfile(path):
         return None
     try:
@@ -44,9 +44,9 @@ def load_places_from_cache() -> Optional[List[Place]]:
         return None
 
 
-def save_places_to_cache(places: List[Place]) -> None:
+def save_places_to_cache(places: List[Place], session: Optional[str] = None) -> None:
     """Сохраняет список чатов в кэш."""
-    path = cache_path()
+    path = cache_path(session)
     data = [
         {
             "chat_id": p.chat_id,
@@ -63,9 +63,9 @@ def save_places_to_cache(places: List[Place]) -> None:
         pass
 
 
-def get_cache_mtime_str() -> Optional[str]:
+def get_cache_mtime_str(session: Optional[str] = None) -> Optional[str]:
     """Возвращает строку «Кэш от DD.MM.YYYY HH:MM» по mtime файла кэша."""
-    path = cache_path()
+    path = cache_path(session)
     if not os.path.isfile(path):
         return None
     try:

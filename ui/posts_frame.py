@@ -21,7 +21,7 @@ from ui.theme import (
     BTN_SECONDARY_DANGER,
     font,
 )
-from ui.queues import request_queue
+from ui.queues import request_queue, scan_paused, scan_stop_requested
 from ui.cache_export import export_messages_to_csv, export_messages_to_json
 from ui.tooltip import bind_tooltip
 
@@ -211,6 +211,8 @@ class PostsFrame(ctk.CTkFrame):
             return
         if not messagebox.askyesno("Подтверждение", f"Удалить {len(ids)} выбранных сообщений? Продолжить?"):
             return
+        scan_paused.clear()
+        scan_stop_requested.clear()
         request_queue.put(("delete_here", self.current_place.chat_id, ids))
 
     def _delete_all_here(self):
@@ -226,6 +228,8 @@ class PostsFrame(ctk.CTkFrame):
         if not messagebox.askyesno("Подтверждение", f"Удалить все {n} сообщений в этом чате (в выбранном периоде)? Продолжить?"):
             return
         ids = [m[0] for m in in_range]
+        scan_paused.clear()
+        scan_stop_requested.clear()
         request_queue.put(("delete_here", self.current_place.chat_id, ids))
 
     def _delete_all_except(self):
@@ -239,6 +243,8 @@ class PostsFrame(ctk.CTkFrame):
         total = sum(len(p.messages) for p in others)
         if not messagebox.askyesno("Подтверждение", f"Удалить все ваши сообщения ({total}) в остальных чатах ({len(others)})? В текущем чате ничего не будет удалено. Продолжить?"):
             return
+        scan_paused.clear()
+        scan_stop_requested.clear()
         request_queue.put(("delete_all_except", self.current_place.chat_id, places))
 
     def _delete_all_no_scan(self):
@@ -246,6 +252,8 @@ class PostsFrame(ctk.CTkFrame):
             return
         if not messagebox.askyesno("Подтверждение", "Удалять все ваши сообщения в этом чате по ходу обхода (без предварительного списка)? Продолжить?"):
             return
+        scan_paused.clear()
+        scan_stop_requested.clear()
         request_queue.put(("delete_all_no_scan", self.current_place.chat_id))
 
     def remove_deleted_ids(self, deleted_ids):
@@ -277,4 +285,3 @@ class PostsFrame(ctk.CTkFrame):
                 messagebox.showinfo("Экспорт", f"Сохранено: {path}")
             except Exception as e:
                 messagebox.showerror("Ошибка", str(e))
-

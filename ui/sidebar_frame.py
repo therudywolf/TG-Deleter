@@ -4,6 +4,7 @@
 import os
 import customtkinter as ctk
 from tkinter import messagebox, simpledialog
+from PIL import Image
 
 from core import get_current_session, get_accounts_list, add_account, remove_account, get_account_profile, get_project_root, set_current_session, get_api_id, get_api_hash
 from ui.login_dialog import LoginDialog
@@ -11,6 +12,11 @@ from ui.theme import PAD, PAD_SM, BTN_RADIUS, RADIUS, SIDEBAR_WIDTH, ACCENT, ACC
 
 _PROJECT_ROOT = get_project_root()
 AVATAR_SIZE_SMALL = 36
+
+
+def _avatar_image(path, size):
+    img = Image.open(path)
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
 
 
 class SidebarFrame(ctk.CTkFrame):
@@ -104,7 +110,7 @@ class SidebarFrame(ctk.CTkFrame):
             avatar_canvas.pack(side="left", padx=PAD_SM, pady=4)
             if avatar_path and os.path.isfile(avatar_path):
                 try:
-                    img = ctk.CTkImage(light_image=avatar_path, dark_image=avatar_path, size=(AVATAR_SIZE_SMALL, AVATAR_SIZE_SMALL))
+                    img = _avatar_image(avatar_path, AVATAR_SIZE_SMALL)
                     lbl = ctk.CTkLabel(avatar_canvas, text="", image=img)
                     lbl.image = img
                     lbl.pack(expand=True)
@@ -178,10 +184,13 @@ class SidebarFrame(ctk.CTkFrame):
         remove_account(session_name)
         if was_current:
             next_list = get_accounts_list()
-            set_current_session(next_list[0] if next_list else None)
+            next_session = next_list[0] if next_list else None
+            set_current_session(next_session)
         self._refresh_accounts_list()
         if not get_accounts_list():
             self.update_profile(None, None)
+        elif was_current and self.on_switch_account:
+            self.on_switch_account(get_current_session())
 
     def set_account(self, session_name):
         self._updating_account = True
@@ -199,7 +208,7 @@ class SidebarFrame(ctk.CTkFrame):
         avatar_path = (me_dict or {}).get("avatar_path") if me_dict else None
         if avatar_path and os.path.isfile(avatar_path):
             try:
-                img = ctk.CTkImage(light_image=avatar_path, dark_image=avatar_path, size=(64, 64))
+                img = _avatar_image(avatar_path, 64)
                 lbl = ctk.CTkLabel(self.avatar_frame, text="", image=img)
                 lbl.image = img
                 lbl.pack(expand=True)

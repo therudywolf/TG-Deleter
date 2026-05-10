@@ -11,8 +11,11 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 from core import (
+    ExportOptions,
     Place,
+    clear_me,
     create_client,
+    export_chats_streaming,
     get_current_session,
     set_current_session,
     set_app,
@@ -24,6 +27,9 @@ from core import (
     delete_message_ids,
     delete_all_my_in_chat_no_scan,
     get_scan_delay_between_chats,
+    get_export_parallel_chats,
+    get_export_include_media,
+    get_export_message_limit,
     get_api_id,
     get_api_hash,
     load_config,
@@ -57,14 +63,44 @@ def worker_loop():
     log.debug("worker_loop started")
 
     async def _run():
+        def handle_control_request(req):
+            if req[0] == "quit":
+                log.debug("worker_loop quit")
+                set_app(None)
+                return "quit"
+            if req[0] == "switch_account":
+                new_session = req[1]
+                clear_me()
+                set_current_session(new_session)
+                set_app(None)
+                response_queue.put(("switch_account_done", new_session))
+                log.debug("worker: switch to %s", new_session)
+                return "switch"
+            response_queue.put(("error", req[0], "Нет подключенной Telegram-сессии."))
+            return "handled"
+
         while True:
             session = get_current_session() or (get_accounts_list() or [None])[0]
             if not session:
+                try:
+                    req = request_queue.get_nowait()
+                    action = handle_control_request(req)
+                    if action == "quit":
+                        return
+                except Empty:
+                    pass
                 await asyncio.sleep(2)
                 continue
             session_file = os.path.join(_PROJECT_ROOT, session + ".session")
             if not os.path.isfile(session_file):
                 response_queue.put(("log_message", "Сессия «%s» не авторизована. Добавьте аккаунт через кнопку «Добавить» в левой панели." % session))
+                try:
+                    req = request_queue.get_nowait()
+                    action = handle_control_request(req)
+                    if action == "quit":
+                        return
+                except Empty:
+                    pass
                 await asyncio.sleep(2)
                 continue
             try:
@@ -111,15 +147,10 @@ def worker_loop():
                             await asyncio.sleep(0.2)
                             continue
                         if req[0] == "quit":
-                            log.debug("worker_loop quit")
-                            set_app(None)
+                            handle_control_request(req)
                             return
                         if req[0] == "switch_account":
-                            new_session = req[1]
-                            set_current_session(new_session)
-                            set_app(None)
-                            response_queue.put(("switch_account_done", new_session))
-                            log.debug("worker: switch to %s", new_session)
+                            handle_control_request(req)
                             break
                         log.debug("worker: request %s", req[0])
                         try:
@@ -130,8 +161,6 @@ def worker_loop():
                                 pause_ev = req[4]
                                 max_my_messages_per_chat = req[5] if len(req) > 5 else None
                                 stop_ev = req[6] if len(req) > 6 else None
-                                scan_paused.clear()
-                                scan_stop_requested.clear()
                                 def on_place(p):
                                     response_queue.put(("scan_place", p))
                                     log.debug("worker: put scan_place")
@@ -148,19 +177,19 @@ def worker_loop():
                                     max_my_messages_per_chat=max_my_messages_per_chat,
                                 )
                                 stopped = stop_ev is not None and stop_ev.is_set()
-                                response_queue.put(("scan_done", places, stopped))
+                                response_queue.put(("scan_done", places, stopped, session))
                                 log.debug("worker: put scan_done, places=%s stopped=%s", len(places), stopped)
                             elif req[0] == "delete_all_no_scan":
                                 cid = req[1]
                                 response_queue.put(("delete_op_status", f"Удаление в чате {cid}..."))
-                                count = await delete_all_my_in_chat_no_scan(cid)
-                                response_queue.put(("delete_all_no_scan_done", cid, count))
+                                count = await delete_all_my_in_chat_no_scan(cid, pause_event=scan_paused, stop_event=scan_stop_requested)
+                                response_queue.put(("delete_all_no_scan_done", cid, count, scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_all_no_scan_done")
                             elif req[0] == "delete_here":
                                 cid, ids = req[1], req[2]
                                 response_queue.put(("delete_op_status", f"Удаляю {len(ids)} сообщений в чате {cid}..."))
-                                deleted_ids = await delete_message_ids(cid, ids)
-                                response_queue.put(("delete_done", cid, deleted_ids))
+                                deleted_ids = await delete_message_ids(cid, ids, pause_event=scan_paused, stop_event=scan_stop_requested)
+                                response_queue.put(("delete_done", cid, deleted_ids, scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_done")
                             elif req[0] == "delete_all_except":
                                 except_cid = req[1]
@@ -169,27 +198,51 @@ def worker_loop():
                                 targets = [p for p in places_list if p.chat_id != except_cid and p.messages]
                                 total_targets = len(targets)
                                 for i, place in enumerate(targets):
+                                    if scan_stop_requested.is_set():
+                                        break
                                     response_queue.put(("delete_op_status", f"Удаление в чатах: {i + 1} из {total_targets}..."))
                                     ids = [m[0] for m in place.messages]
                                     if ids:
-                                        deleted_ids = await delete_message_ids(place.chat_id, ids)
+                                        deleted_ids = await delete_message_ids(place.chat_id, ids, pause_event=scan_paused, stop_event=scan_stop_requested)
                                         if deleted_ids:
                                             deleted_map[place.chat_id] = deleted_ids
                                     if get_scan_delay_between_chats() > 0:
                                         await asyncio.sleep(get_scan_delay_between_chats())
-                                response_queue.put(("delete_all_except_done", deleted_map))
+                                response_queue.put(("delete_all_except_done", deleted_map, scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_all_except_done")
                             elif req[0] == "delete_in_places":
                                 chat_ids = req[1]
                                 total_deleted = 0
                                 for i, cid in enumerate(chat_ids):
+                                    if scan_stop_requested.is_set():
+                                        break
                                     response_queue.put(("delete_batch_progress", i + 1, len(chat_ids), cid))
-                                    n = await delete_all_my_in_chat_no_scan(cid)
+                                    n = await delete_all_my_in_chat_no_scan(cid, pause_event=scan_paused, stop_event=scan_stop_requested)
                                     total_deleted += n
                                     if get_scan_delay_between_chats() > 0:
                                         await asyncio.sleep(get_scan_delay_between_chats())
-                                response_queue.put(("delete_batch_done", total_deleted, chat_ids))
+                                response_queue.put(("delete_batch_done", total_deleted, chat_ids, scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_batch_done, deleted=%s", total_deleted)
+                            elif req[0] == "export_chats":
+                                output_dir = req[1]
+                                chat_ids = req[2]
+                                options = ExportOptions(
+                                    output_dir=output_dir,
+                                    chat_ids=chat_ids,
+                                    parallel_chats=get_export_parallel_chats(),
+                                    include_media=get_export_include_media(),
+                                    message_limit=get_export_message_limit(),
+                                )
+                                def on_export(kind, payload):
+                                    response_queue.put(("export_progress", kind, payload))
+                                root, manifest = await export_chats_streaming(
+                                    options,
+                                    pause_event=scan_paused,
+                                    stop_event=scan_stop_requested,
+                                    progress_callback=on_export,
+                                )
+                                response_queue.put(("export_done", root, manifest, scan_stop_requested.is_set()))
+                                log.debug("worker: put export_done, root=%s", root)
                         except Exception as e:
                             log.exception("worker error in %s: %s", req[0], e)
                             response_queue.put(("error", req[0], str(e)))
@@ -217,6 +270,8 @@ class App:
         self._worker_started = False
         self._worker_thread = None
         self._closing = False
+        self._operation_running = False
+        self._pending_switch_session = None
 
         main = ctk.CTkFrame(self.root, fg_color="transparent")
         main.pack(fill="both", expand=True)
@@ -247,6 +302,7 @@ class App:
             on_open_place=self._open_place,
             on_start_scan=self._on_start_scan,
             on_refresh_cache=self._refresh_cache,
+            on_export_places=self._on_export_places,
         )
         self.posts_frame = PostsFrame(content, on_back=self._show_places, all_places_getter=lambda: self.places)
 
@@ -271,11 +327,12 @@ class App:
             self.places_frame.pack(fill="both", expand=True)
             self.posts_frame.pack(fill="both", expand=True)
             self.posts_frame.pack_forget()
-            cached = load_places_from_cache()
+            session = get_current_session()
+            cached = load_places_from_cache(session)
             if cached:
                 self.places = cached
                 self.places_frame.set_places(self.places)
-                mtime = get_cache_mtime_str()
+                mtime = get_cache_mtime_str(session)
                 if mtime:
                     self.places_frame.status_label.configure(
                         text=f"Кэш от {mtime}. Чатов: {len(self.places)}. Сканировать или обновить из кэша."
@@ -302,11 +359,12 @@ class App:
         self.places_frame.pack(fill="both", expand=True)
         self.posts_frame.pack(fill="both", expand=True)
         self.posts_frame.pack_forget()
-        cached = load_places_from_cache()
+        session = get_current_session()
+        cached = load_places_from_cache(session)
         if cached:
             self.places = cached
             self.places_frame.set_places(self.places)
-            mtime = get_cache_mtime_str()
+            mtime = get_cache_mtime_str(session)
             if mtime:
                 self.places_frame.status_label.configure(
                     text=f"Кэш от {mtime}. Чатов: {len(self.places)}. Сканировать или обновить из кэша."
@@ -338,10 +396,18 @@ class App:
         self.places_frame.pack(fill="both", expand=True)
 
     def _on_switch_account(self, session_name):
+        session_name = (session_name or "").strip()
+        if not session_name:
+            return
+        self._pending_switch_session = session_name
+        if self._operation_running or getattr(self.places_frame, "_scanning", False):
+            scan_stop_requested.set()
+            scan_paused.clear()
+            self.places_frame.status_label.configure(text=f"Останавливаю текущую операцию и переключаюсь на {session_name}...")
         request_queue.put(("switch_account", session_name))
 
     def _on_clear_cache(self):
-        clear_cache()
+        clear_cache(get_current_session())
         self.places = []
         self.places_frame.set_places(self.places)
         self.places_frame.status_label.configure(text="Кэш сброшен. Нажмите «Сканировать».")
@@ -359,19 +425,37 @@ class App:
         self._on_close()
 
     def _refresh_cache(self):
-        cached = load_places_from_cache()
+        session = get_current_session()
+        cached = load_places_from_cache(session)
         if cached is None:
             self.places_frame.status_label.configure(text="Кэш не найден или пуст.")
             return
         self.places = cached
         self.places_frame.set_places(self.places)
-        mtime = get_cache_mtime_str()
+        mtime = get_cache_mtime_str(session)
         self.places_frame.status_label.configure(text=f"Загружено из кэша ({mtime}). Чатов: {len(self.places)}.")
         log.debug("refresh_cache: loaded %s places", len(self.places))
 
     def _on_start_scan(self):
+        self._operation_running = True
+        self._pending_switch_session = None
         self.places = []
         self.places_frame.set_places(self.places)
+
+    def _on_export_places(self, output_dir, chat_ids):
+        if not chat_ids:
+            messagebox.showinfo("Экспорт", "Отметьте один или несколько чатов для экспорта.")
+            return
+        if not get_current_session():
+            messagebox.showwarning("Экспорт", "Сначала добавьте аккаунт.")
+            return
+        scan_paused.clear()
+        scan_stop_requested.clear()
+        self._operation_running = True
+        self._pending_switch_session = None
+        self.places_frame.set_scanning(True, label="Экспортирую")
+        self.places_frame.status_label.configure(text=f"Экспорт выбранных чатов: {len(chat_ids)}...")
+        request_queue.put(("export_chats", output_dir, chat_ids))
 
     def _open_place(self, place: Place):
         self.places_frame.pack_forget()
@@ -414,13 +498,17 @@ class App:
                         self.sidebar.update_profile(self.me, session)
                     elif msg[0] == "switch_account_done":
                         log.debug("Got switch_account_done: %s", msg[1])
+                        self._pending_switch_session = None
+                        self._operation_running = False
+                        self.places_frame.set_scanning(False)
                         self.places = []
                         self.places_frame.set_places(self.places)
-                        cached = load_places_from_cache()
+                        session = msg[1]
+                        cached = load_places_from_cache(session)
                         if cached:
                             self.places = cached
                             self.places_frame.set_places(self.places)
-                            mtime = get_cache_mtime_str()
+                            mtime = get_cache_mtime_str(session)
                             if mtime:
                                 self.places_frame.status_label.configure(
                                     text=f"Кэш от {mtime}. Чатов: {len(self.places)}. Сканировать или обновить из кэша."
@@ -458,10 +546,16 @@ class App:
                         log.debug("Got scan_done")
                         self.places = msg[1]
                         stopped = msg[2] if len(msg) > 2 else False
+                        session = msg[3] if len(msg) > 3 else get_current_session()
+                        save_places_to_cache(self.places, session)
+                        mtime = get_cache_mtime_str(session)
+                        self._operation_running = False
+                        if self._pending_switch_session and session != self._pending_switch_session:
+                            self.places_frame.set_scanning(False)
+                            self.places_frame.status_label.configure(text="Операция остановлена. Переключаю аккаунт...")
+                            continue
                         self.places_frame.set_places(self.places)
                         self.places_frame.set_scanning(False)
-                        save_places_to_cache(self.places)
-                        mtime = get_cache_mtime_str()
                         if stopped:
                             self.places_frame.status_label.configure(
                                 text=f"Скан остановлен. Найдено чатов: {len(self.places)}. Кэш обновлён ({mtime})."
@@ -475,10 +569,13 @@ class App:
                                 text="Кэш обновлён (%s). Чатов: %s. Выберите чат и нажмите «Открыть»." % (mtime or "", len(self.places))
                             )
                     elif msg[0] == "delete_op_status":
+                        self._operation_running = True
                         self.places_frame.status_label.configure(text=msg[1])
                     elif msg[0] == "delete_done":
                         log.debug("Got delete_done")
                         cid, deleted_ids = msg[1], msg[2]
+                        stopped = msg[3] if len(msg) > 3 else False
+                        self._operation_running = False
                         deleted_set = set(deleted_ids)
                         self.posts_frame.remove_deleted_ids(deleted_ids)
                         for p in self.places:
@@ -487,10 +584,13 @@ class App:
                                 break
                         self.places = [p for p in self.places if p.messages]
                         self.places_frame.set_places(self.places)
-                        messagebox.showinfo("Готово", "Удалено сообщений: %s" % len(deleted_ids))
+                        title = "Остановлено" if stopped else "Готово"
+                        messagebox.showinfo(title, "Удалено сообщений: %s" % len(deleted_ids))
                     elif msg[0] == "delete_all_except_done":
                         log.debug("Got delete_all_except_done")
                         deleted_map = msg[1] if len(msg) > 1 else {}
+                        stopped = msg[2] if len(msg) > 2 else False
+                        self._operation_running = False
                         except_cid = self.posts_frame.current_place.chat_id if self.posts_frame.current_place else None
                         total_deleted = sum(len(v) for v in deleted_map.values()) if deleted_map else 0
                         for p in self.places:
@@ -501,10 +601,12 @@ class App:
                                     p.messages = [(m[0], m[1], m[2]) for m in p.messages if m[0] not in del_set]
                         self.places = [p for p in self.places if p.messages]
                         self.places_frame.set_places(self.places)
-                        messagebox.showinfo("Готово", "Удалено сообщений: %s" % total_deleted)
+                        messagebox.showinfo("Остановлено" if stopped else "Готово", "Удалено сообщений: %s" % total_deleted)
                     elif msg[0] == "delete_all_no_scan_done":
                         log.debug("Got delete_all_no_scan_done")
                         cid, count = msg[1], msg[2]
+                        stopped = msg[3] if len(msg) > 3 else False
+                        self._operation_running = False
                         for p in self.places:
                             if p.chat_id == cid:
                                 p.messages = []
@@ -514,12 +616,14 @@ class App:
                         if self.posts_frame.current_place and self.posts_frame.current_place.chat_id == cid:
                             self.posts_frame.current_place.messages = []
                             self.posts_frame.set_place(self.posts_frame.current_place)
-                        messagebox.showinfo("Готово", "Удалено сообщений: %s" % count)
+                        messagebox.showinfo("Остановлено" if stopped else "Готово", "Удалено сообщений: %s" % count)
                     elif msg[0] == "delete_batch_progress":
                         i, total, cid = msg[1], msg[2], msg[3]
                         self.places_frame.status_label.configure(text="Удаление в чатах: %s из %s…" % (i, total))
                     elif msg[0] == "delete_batch_done":
                         total_deleted, chat_ids = msg[1], msg[2]
+                        stopped = msg[3] if len(msg) > 3 else False
+                        self._operation_running = False
                         for cid in chat_ids:
                             for p in self.places:
                                 if p.chat_id == cid:
@@ -531,7 +635,34 @@ class App:
                             self.posts_frame.current_place.messages = []
                             self.posts_frame.set_place(self.posts_frame.current_place)
                         self.places_frame.status_label.configure(text="Выберите чат и нажмите «Открыть» или дважды щёлкните по карточке.")
-                        messagebox.showinfo("Готово", "Удалено сообщений: %s в %s чатах." % (total_deleted, len(chat_ids)))
+                        messagebox.showinfo("Остановлено" if stopped else "Готово", "Удалено сообщений: %s в %s чатах." % (total_deleted, len(chat_ids)))
+                    elif msg[0] == "export_progress":
+                        kind = msg[1]
+                        payload = msg[2] if len(msg) > 2 else {}
+                        if kind == "chat_start":
+                            self.places_frame.status_label.configure(text="Экспорт: %s..." % payload.get("title", payload.get("chat_id", "")))
+                        elif kind == "chat_progress":
+                            self.places_frame.status_label.configure(
+                                text="Экспорт: %s, сообщений: %s, медиа: %s"
+                                % (payload.get("title", ""), payload.get("messages", 0), payload.get("media", 0))
+                            )
+                        elif kind == "chat_done":
+                            self.places_frame.status_label.configure(
+                                text="Готов чат: %s, сообщений: %s"
+                                % (payload.get("title", ""), payload.get("messages", 0))
+                            )
+                    elif msg[0] == "export_done":
+                        root, manifest = msg[1], msg[2]
+                        stopped = msg[3] if len(msg) > 3 else False
+                        self._operation_running = False
+                        self.places_frame.set_scanning(False)
+                        total_messages = manifest.get("total_messages", 0)
+                        total_media = manifest.get("total_media", 0)
+                        self.places_frame.status_label.configure(text=f"Экспорт готов: {root}")
+                        messagebox.showinfo(
+                            "Остановлено" if stopped else "Экспорт готов",
+                            "Папка: %s\nСообщений: %s\nМедиа: %s" % (root, total_messages, total_media),
+                        )
                     elif msg[0] == "error":
                         op = msg[1] if len(msg) > 1 else ""
                         err = msg[2] if len(msg) > 2 else (msg[1] if len(msg) > 1 else "Неизвестная ошибка")
@@ -539,6 +670,10 @@ class App:
                         if op == "scan":
                             self.places_frame.set_scanning(False)
                             self.places_frame.status_label.configure(text="Ошибка сканирования")
+                        if op == "export_chats":
+                            self.places_frame.set_scanning(False)
+                            self.places_frame.status_label.configure(text="Ошибка экспорта")
+                        self._operation_running = False
                         messagebox.showerror("Ошибка", err)
                 except Exception as e:
                     import traceback
@@ -556,6 +691,7 @@ class App:
         if self._closing:
             return
         self._closing = True
+        scan_stop_requested.set()
         request_queue.put(("quit",))
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=2.0)

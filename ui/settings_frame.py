@@ -69,6 +69,18 @@ class SettingsFrame(ctk.CTkFrame):
         ctk.CTkLabel(row5, text="Задержка между чатами при скане (сек):", width=220, anchor="w").pack(side="left", padx=(0, PAD_SM))
         self.scan_delay_var = ctk.StringVar(value=str(api_cfg.get("scan_delay_between_chats") or "2.0"))
         ctk.CTkEntry(row5, textvariable=self.scan_delay_var, width=80).pack(side="left")
+        row6 = ctk.CTkFrame(inner, fg_color="transparent")
+        row6.pack(fill="x", pady=(PAD_SM, 0))
+        ctk.CTkLabel(row6, text="Параллельных чатов при экспорте:", width=220, anchor="w").pack(side="left", padx=(0, PAD_SM))
+        self.export_parallel_var = ctk.StringVar(value=str(api_cfg.get("export_parallel_chats") or "2"))
+        ctk.CTkEntry(row6, textvariable=self.export_parallel_var, width=80).pack(side="left")
+        self.export_media_var = ctk.BooleanVar(value=api_cfg.get("export_include_media", True) is not False)
+        ctk.CTkCheckBox(row6, text="Скачивать медиа", variable=self.export_media_var).pack(side="left", padx=PAD_SM)
+        row7 = ctk.CTkFrame(inner, fg_color="transparent")
+        row7.pack(fill="x", pady=(PAD_SM, 0))
+        ctk.CTkLabel(row7, text="Лимит экспорта на чат (пусто = всё):", width=220, anchor="w").pack(side="left", padx=(0, PAD_SM))
+        self.export_limit_var = ctk.StringVar(value=str(api_cfg.get("export_message_limit") or ""))
+        ctk.CTkEntry(row7, textvariable=self.export_limit_var, width=100, placeholder_text="пусто").pack(side="left")
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", pady=PAD)
@@ -96,14 +108,32 @@ class SettingsFrame(ctk.CTkFrame):
             scan_delay = float((self.scan_delay_var.get() or "2").strip() or "2")
         except ValueError:
             scan_delay = 2.0
+        try:
+            export_parallel = int((self.export_parallel_var.get() or "2").strip() or "2")
+        except ValueError:
+            export_parallel = 2
+        export_parallel = max(1, min(6, export_parallel))
         scan_limit_str = (self.scan_limit_var.get() or "").strip()
-        scan_limit = int(scan_limit_str) if scan_limit_str else None
+        try:
+            scan_limit = int(scan_limit_str) if scan_limit_str else None
+        except ValueError:
+            messagebox.showwarning("Настройки", "Лимит скана должен быть числом или пустым.")
+            return
+        export_limit_str = (self.export_limit_var.get() or "").strip()
+        try:
+            export_limit = int(export_limit_str) if export_limit_str else None
+        except ValueError:
+            messagebox.showwarning("Настройки", "Лимит экспорта должен быть числом или пустым.")
+            return
         c = load_api_config()
         c["api_id"] = api_id
         c["api_hash"] = api_hash_str
         c["delay_sec"] = delay_sec
         c["scan_delay_between_chats"] = scan_delay
         c["scan_limit"] = scan_limit
+        c["export_parallel_chats"] = export_parallel
+        c["export_include_media"] = self.export_media_var.get()
+        c["export_message_limit"] = export_limit
         save_api_config(c)
         self.status_label.configure(text="Настройки сохранены.")
         if self.on_saved:
@@ -118,6 +148,9 @@ class SettingsFrame(ctk.CTkFrame):
         self.scan_limit_var.set("")
         self.delay_sec_var.set("0.2")
         self.scan_delay_var.set("2.0")
+        self.export_parallel_var.set("2")
+        self.export_media_var.set(True)
+        self.export_limit_var.set("")
         self.status_label.configure(text="Настройки сброшены. Введите API и нажмите «Сохранить».")
 
     def refresh_from_config(self):
@@ -128,6 +161,9 @@ class SettingsFrame(ctk.CTkFrame):
         self.scan_limit_var.set(str(api_cfg.get("scan_limit") or ""))
         self.delay_sec_var.set(str(api_cfg.get("delay_sec") or "0.2"))
         self.scan_delay_var.set(str(api_cfg.get("scan_delay_between_chats") or "2.0"))
+        self.export_parallel_var.set(str(api_cfg.get("export_parallel_chats") or "2"))
+        self.export_media_var.set(api_cfg.get("export_include_media", True) is not False)
+        self.export_limit_var.set(str(api_cfg.get("export_message_limit") or ""))
 
     def set_initial_setup(self, is_initial_setup):
         """Переключить заголовок между «Первоначальная настройка» и «Настройки»."""

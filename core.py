@@ -7,7 +7,11 @@ import json
 import logging
 import asyncio
 import re
+import html
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait
@@ -26,6 +30,10 @@ _API_DEFAULTS = {
     "scan_include_groups": True,
     "scan_include_channels": True,
     "scan_include_private": True,
+    "scan_depth_per_chat": 10,
+    "export_parallel_chats": 2,
+    "export_include_media": True,
+    "export_message_limit": None,
 }
 # Дефолты для config.json (только приложение: сессии и аккаунты)
 _APP_DEFAULTS = {
@@ -241,6 +249,19 @@ def get_scan_include_private():
     return v if isinstance(v, bool) else True
 
 
+def get_export_parallel_chats():
+    return max(1, min(6, _int(get_api_config().get("export_parallel_chats"), 2)))
+
+
+def get_export_include_media():
+    v = get_api_config().get("export_include_media")
+    return v if isinstance(v, bool) else True
+
+
+def get_export_message_limit():
+    return _int(get_api_config().get("export_message_limit"))
+
+
 # ---------- App config (config.json): session_name, accounts, current_session ----------
 
 def load_config():
@@ -442,14 +463,24 @@ def get_app():
     return _current_app
 
 
+def clear_me():
+    """Сбросить данные текущего пользователя перед переключением аккаунта."""
+    global my_user_id, my_username, my_first_name, my_last_name, my_channel_ids
+    my_user_id = None
+    my_username = None
+    my_first_name = None
+    my_last_name = None
+    my_channel_ids = set()
+
+
 def set_me_from_dict(me_dict):
     """Обновить my_user_id / my_username / имя из результата get_me (для check_if_mine)."""
     global my_user_id, my_username, my_first_name, my_last_name
     if me_dict:
-        my_user_id = me_dict.get("id") or my_user_id
-        my_username = (me_dict.get("username") or "").strip() or my_username
-        my_first_name = (me_dict.get("first_name") or "").strip() or my_first_name
-        my_last_name = (me_dict.get("last_name") or "").strip() or my_last_name
+        my_user_id = me_dict.get("id")
+        my_username = (me_dict.get("username") or "").strip() or None
+        my_first_name = (me_dict.get("first_name") or "").strip() or None
+        my_last_name = (me_dict.get("last_name") or "").strip() or None
     log.debug("set_me_from_dict: my_user_id=%s my_username=%s", my_user_id, my_username)
 
 
@@ -460,6 +491,44 @@ class Place:
     title: str
     type_str: str
     messages: list = field(default_factory=list)  # [(message_id, preview, date_str), ...]
+
+
+@dataclass
+class ExportOptions:
+    """Параметры потокового экспорта выбранных чатов."""
+    output_dir: str
+    chat_ids: list
+    parallel_chats: int = 2
+    include_media: bool = True
+    message_limit: int | None = None
+    export_format: str = "html_jsonl"
+
+
+async def _sleep_responsive(seconds, pause_event=None, stop_event=None, step=0.2):
+    """Сон, который реагирует на паузу и остановку."""
+    end = time.monotonic() + max(0, float(seconds or 0))
+    while time.monotonic() < end:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        if pause_event is not None and pause_event.is_set():
+            ok = await _wait_if_paused(pause_event, stop_event)
+            if not ok:
+                return False
+        await asyncio.sleep(min(step, max(0, end - time.monotonic())))
+    return stop_event is None or not stop_event.is_set()
+
+
+async def _wait_if_paused(pause_event=None, stop_event=None):
+    """Ждать снятия паузы. Возвращает False, если во время паузы запросили остановку."""
+    while pause_event is not None and pause_event.is_set():
+        if stop_event is not None and stop_event.is_set():
+            return False
+        await asyncio.sleep(0.2)
+    return stop_event is None or not stop_event.is_set()
+
+
+def _is_stopped(stop_event=None):
+    return stop_event is not None and stop_event.is_set()
 
 
 def _chat_title(chat) -> str:
@@ -553,7 +622,7 @@ def _message_date_str(message) -> str:
     return d.strftime("%Y-%m-%d %H:%M")
 
 
-async def delete_message_ids(cid, message_ids):
+async def delete_message_ids(cid, message_ids, pause_event=None, stop_event=None, progress_callback=None):
     """
     Удаляет сообщения в чате cid по списку ID с паузами и повторной попыткой при FloodWait.
     Возвращает список успешно удалённых message_id.
@@ -565,18 +634,29 @@ async def delete_message_ids(cid, message_ids):
     client = get_app()
     if not client:
         return []
+    total = len(message_ids)
     for mid in message_ids:
+        if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+            log.debug("delete_message_ids stopped: chat_id=%s deleted=%s", cid, len(deleted_ids))
+            break
         while True:
             try:
                 mid_int = int(mid)
                 await client.delete_messages(cid, mid_int)
                 log.debug("Удалён пост: chat_id=%s message_id=%s", cid, mid_int)
                 deleted_ids.append(mid_int)
-                await asyncio.sleep(get_delay_sec())
+                if progress_callback:
+                    try:
+                        progress_callback(len(deleted_ids), total, cid)
+                    except Exception:
+                        pass
+                if not await _sleep_responsive(get_delay_sec(), pause_event, stop_event):
+                    break
                 break
             except FloodWait as e:
                 log.warning("FloodWait: ждём %s сек", e.value)
-                await asyncio.sleep(e.value)
+                if not await _sleep_responsive(e.value, pause_event, stop_event):
+                    break
             except Exception as e:
                 log.exception("Ошибка удаления message_id=%s: %s", mid, e)
                 break
@@ -584,7 +664,7 @@ async def delete_message_ids(cid, message_ids):
     return deleted_ids
 
 
-async def scan_chat(cid):
+async def scan_chat(cid, pause_event=None, stop_event=None):
     """
     Сканирует один чат и возвращает список своих сообщений: [(message_id, preview, date_str), ...].
     """
@@ -597,6 +677,8 @@ async def scan_chat(cid):
     while True:
         try:
             async for message in client.get_chat_history(cid, **kwargs):
+                if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                    break
                 if await check_if_mine(message):
                     preview = make_preview(message)
                     date_str = _message_date_str(message)
@@ -604,7 +686,8 @@ async def scan_chat(cid):
             break
         except FloodWait as e:
             log.warning("FloodWait scan_chat %s: ждём %s сек", cid, e.value)
-            await asyncio.sleep(e.value)
+            if not await _sleep_responsive(e.value, pause_event, stop_event):
+                break
         except Exception as e:
             log.warning("scan_chat error %s: %s", cid, e)
             break
@@ -649,10 +732,9 @@ async def scan_all_dialogs(
         if ct == ChatType.CHANNEL and not include_channels:
             continue
 
-        if pause_event is not None and pause_event.is_set():
-            log.debug("scan_all_dialogs: пауза")
-            while pause_event.is_set():
-                await asyncio.sleep(0.5)
+        if not await _wait_if_paused(pause_event, stop_event):
+            log.debug("scan_all_dialogs: останов во время паузы")
+            break
 
         n += 1
         title = _chat_title(chat)
@@ -675,6 +757,8 @@ async def scan_all_dialogs(
         while True:
             try:
                 async for message in client.get_chat_history(cid, **kwargs):
+                    if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                        break
                     try:
                         if await check_if_mine(message):
                             preview = make_preview(message)
@@ -687,7 +771,8 @@ async def scan_all_dialogs(
                 break
             except FloodWait as e:
                 log.warning("FloodWait при скане «%s»: ждём %s сек", title[:30], e.value)
-                await asyncio.sleep(e.value)
+                if not await _sleep_responsive(e.value, pause_event, stop_event):
+                    break
             except Exception as e:
                 log.warning("Пропуск диалога %s: %s", title[:30], e)
                 break
@@ -706,12 +791,13 @@ async def scan_all_dialogs(
             except Exception:
                 pass
         if get_scan_delay_between_chats() > 0:
-            await asyncio.sleep(get_scan_delay_between_chats())
+            if not await _sleep_responsive(get_scan_delay_between_chats(), pause_event, stop_event):
+                break
     log.debug("scan_all_dialogs done: всего мест %s", len(places))
     return places
 
 
-async def delete_all_my_in_chat_no_scan(cid, progress_callback=None):
+async def delete_all_my_in_chat_no_scan(cid, progress_callback=None, pause_event=None, stop_event=None):
     """
     Обходит историю чата cid и удаляет каждое своё сообщение по ходу (без предварительного списка).
     progress_callback(count) — вызывается каждые 10 удалённых сообщений.
@@ -726,9 +812,13 @@ async def delete_all_my_in_chat_no_scan(cid, progress_callback=None):
     while True:
         try:
             async for message in client.get_chat_history(cid, **kwargs):
+                if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                    break
                 if not await check_if_mine(message):
                     continue
                 while True:
+                    if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                        break
                     try:
                         await client.delete_messages(cid, message.id)
                         log.debug("Удалён пост (no_scan): chat_id=%s message_id=%s", cid, message.id)
@@ -738,20 +828,263 @@ async def delete_all_my_in_chat_no_scan(cid, progress_callback=None):
                                 progress_callback(count)
                             except Exception:
                                 pass
-                        await asyncio.sleep(get_delay_sec())
+                        if not await _sleep_responsive(get_delay_sec(), pause_event, stop_event):
+                            break
                         break
                     except FloodWait as e:
                         log.warning("FloodWait: ждём %s сек", e.value)
-                        await asyncio.sleep(e.value)
+                        if not await _sleep_responsive(e.value, pause_event, stop_event):
+                            break
                     except Exception as e:
                         log.exception("Ошибка удаления message_id=%s: %s", message.id, e)
                         break
             break
         except FloodWait as e:
             log.warning("FloodWait на чтении истории (no_scan): ждём %s сек", e.value)
-            await asyncio.sleep(e.value)
+            if not await _sleep_responsive(e.value, pause_event, stop_event):
+                break
         except Exception as e:
             log.exception("Ошибка обхода истории (no_scan) chat_id=%s: %s", cid, e)
             break
     log.debug("delete_all_my_in_chat_no_scan done: chat_id=%s deleted=%s", cid, count)
     return count
+
+
+def _safe_filename(value, fallback="chat", max_len=80):
+    """Безопасное имя папки/файла для Windows и Linux."""
+    text = str(value or "").strip() or fallback
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    if not text:
+        text = fallback
+    return text[:max_len].rstrip(" .") or fallback
+
+
+def _message_sender_name(message):
+    from_user = getattr(message, "from_user", None)
+    if from_user:
+        first = getattr(from_user, "first_name", None) or ""
+        last = getattr(from_user, "last_name", None) or ""
+        username = getattr(from_user, "username", None)
+        name = f"{first} {last}".strip()
+        if username:
+            return f"{name} (@{username})" if name else f"@{username}"
+        return name or str(getattr(from_user, "id", ""))
+    sender_chat = getattr(message, "sender_chat", None)
+    if sender_chat:
+        return _chat_title(sender_chat)
+    return ""
+
+
+def _message_text(message):
+    text = getattr(message, "text", None) or getattr(message, "caption", None)
+    if text:
+        return str(text)
+    media = getattr(message, "media", None)
+    if media:
+        return f"[{media}]"
+    service = getattr(message, "service", None)
+    if service:
+        return f"[{service}]"
+    return ""
+
+
+def _message_record(chat_id, message, media_rel_path=None):
+    date = getattr(message, "date", None)
+    return {
+        "id": getattr(message, "id", None),
+        "chat_id": chat_id,
+        "date": date.isoformat() if date else None,
+        "sender": _message_sender_name(message),
+        "text": _message_text(message),
+        "media": media_rel_path,
+        "outgoing": bool(getattr(message, "out", False) or getattr(message, "outgoing", False)),
+    }
+
+
+def _html_header(title):
+    safe_title = html.escape(title or "Telegram export")
+    return (
+        "<!doctype html>\n<html lang=\"ru\">\n<head>\n"
+        "<meta charset=\"utf-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        f"<title>{safe_title}</title>\n"
+        "<style>"
+        "body{font-family:Segoe UI,Arial,sans-serif;background:#0e1621;color:#d7e3ee;margin:0;padding:24px;}"
+        "main{max-width:920px;margin:0 auto;}"
+        "h1{font-size:22px;margin:0 0 16px;}"
+        ".msg{background:#182533;border:1px solid #26394d;border-radius:8px;padding:10px 12px;margin:8px 0;}"
+        ".meta{color:#8aa2b7;font-size:12px;margin-bottom:6px;}"
+        ".text{white-space:pre-wrap;line-height:1.45;}"
+        "a{color:#2aabee;}"
+        "</style>\n</head>\n<body><main>\n"
+        f"<h1>{safe_title}</h1>\n"
+    )
+
+
+def _html_message(record):
+    date = html.escape(record.get("date") or "")
+    sender = html.escape(record.get("sender") or "")
+    text = html.escape(record.get("text") or "")
+    media = record.get("media")
+    media_html = ""
+    if media:
+        media_escaped = html.escape(media)
+        media_html = f'<div><a href="{media_escaped}">media</a></div>'
+    return (
+        "<article class=\"msg\">"
+        f"<div class=\"meta\">{date} · {sender} · id {record.get('id')}</div>"
+        f"<div class=\"text\">{text}</div>{media_html}</article>\n"
+    )
+
+
+async def _download_message_media(client, message, media_dir, pause_event=None, stop_event=None):
+    if _is_stopped(stop_event):
+        return None
+    if not getattr(message, "media", None):
+        return None
+    while True:
+        if not await _wait_if_paused(pause_event, stop_event):
+            return None
+        try:
+            downloaded = await client.download_media(message, file_name=str(media_dir) + os.sep)
+            if downloaded and os.path.isfile(downloaded):
+                return downloaded
+            return None
+        except FloodWait as e:
+            log.warning("FloodWait download_media: ждём %s сек", e.value)
+            if not await _sleep_responsive(e.value, pause_event, stop_event):
+                return None
+        except Exception as e:
+            log.warning("download_media skip message_id=%s: %s", getattr(message, "id", None), e)
+            return None
+
+
+async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_event=None, progress_callback=None):
+    """
+    Потоковый параллельный экспорт выбранных чатов.
+
+    Пишет:
+      - messages.jsonl — основной машинный формат, одна строка на сообщение;
+      - messages.html — читаемый просмотр;
+      - media/ — скачанные вложения, если включено;
+      - manifest.json — сводка по экспортированным чатам.
+    """
+    client = get_app()
+    if not client:
+        raise RuntimeError("Telegram-клиент не подключён.")
+
+    chat_ids = [int(x) for x in options.chat_ids if str(x).strip()]
+    if not chat_ids:
+        raise ValueError("Не выбраны чаты для экспорта.")
+
+    base_dir = Path(options.output_dir).expanduser()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    session = _safe_filename(get_cache_session_key(), "session", 40)
+    export_root = base_dir / f"TG_Deleter_export_{session}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    export_root.mkdir(parents=True, exist_ok=False)
+
+    parallel = max(1, min(6, int(options.parallel_chats or 1)))
+    semaphore = asyncio.Semaphore(parallel)
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "session": get_cache_session_key(),
+        "parallel_chats": parallel,
+        "include_media": bool(options.include_media),
+        "message_limit": options.message_limit,
+        "stopped": False,
+        "chats": [],
+    }
+
+    def emit(kind, **payload):
+        if not progress_callback:
+            return
+        try:
+            progress_callback(kind, payload)
+        except Exception:
+            pass
+
+    async def export_one(chat_id):
+        async with semaphore:
+            if _is_stopped(stop_event):
+                return {
+                    "chat_id": chat_id,
+                    "title": str(chat_id),
+                    "status": "skipped",
+                    "messages": 0,
+                    "media": 0,
+                }
+            title = str(chat_id)
+            stats = {
+                "chat_id": chat_id,
+                "title": title,
+                "type": "Чат",
+                "folder": "",
+                "status": "ok",
+                "messages": 0,
+                "media": 0,
+            }
+            try:
+                chat = await client.get_chat(chat_id)
+                title = _chat_title(chat)
+                folder = export_root / f"{_safe_filename(title)}_{chat_id}"
+                media_dir = folder / "media"
+                folder.mkdir(parents=True, exist_ok=True)
+                media_dir.mkdir(exist_ok=True)
+                jsonl_path = folder / "messages.jsonl"
+                html_path = folder / "messages.html"
+                stats.update({
+                    "title": title,
+                    "type": _chat_type_str(chat),
+                    "folder": folder.name,
+                })
+                emit("chat_start", chat_id=chat_id, title=title)
+                kwargs = {"limit": options.message_limit} if options.message_limit else {}
+                with open(jsonl_path, "w", encoding="utf-8") as jf, open(html_path, "w", encoding="utf-8") as hf:
+                    hf.write(_html_header(title))
+                    async for message in client.get_chat_history(chat_id, **kwargs):
+                        if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                            stats["status"] = "stopped"
+                            break
+                        media_rel = None
+                        if options.include_media:
+                            media_path = await _download_message_media(client, message, media_dir, pause_event, stop_event)
+                            if media_path:
+                                stats["media"] += 1
+                                media_rel = os.path.relpath(media_path, folder).replace(os.sep, "/")
+                        record = _message_record(chat_id, message, media_rel)
+                        jf.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        hf.write(_html_message(record))
+                        stats["messages"] += 1
+                        if stats["messages"] % 25 == 0:
+                            jf.flush()
+                            hf.flush()
+                            emit("chat_progress", chat_id=chat_id, title=title, messages=stats["messages"], media=stats["media"])
+                    hf.write("</main></body></html>\n")
+                emit("chat_done", chat_id=chat_id, title=title, messages=stats["messages"], media=stats["media"], status=stats["status"])
+            except FloodWait as e:
+                stats["status"] = "flood_wait"
+                stats["error"] = f"FloodWait {e.value}"
+                log.warning("FloodWait export chat %s: %s", chat_id, e.value)
+                await _sleep_responsive(e.value, pause_event, stop_event)
+            except Exception as e:
+                stats["status"] = "error"
+                stats["error"] = str(e)
+                log.exception("export chat %s failed: %s", chat_id, e)
+                emit("chat_error", chat_id=chat_id, title=title, error=str(e))
+            return stats
+
+    tasks = [asyncio.create_task(export_one(cid)) for cid in chat_ids]
+    for task in asyncio.as_completed(tasks):
+        result = await task
+        manifest["chats"].append(result)
+        if _is_stopped(stop_event):
+            manifest["stopped"] = True
+
+    manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
+    manifest["total_messages"] = sum(c.get("messages", 0) for c in manifest["chats"])
+    manifest["total_media"] = sum(c.get("media", 0) for c in manifest["chats"])
+    with open(export_root / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    emit("done", export_root=str(export_root), manifest=manifest)
+    return str(export_root), manifest

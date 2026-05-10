@@ -7,5 +7,9 @@
   "chat_id_cli": null,
   "scan_include_groups": true,
   "scan_include_channels": true,
-  "scan_include_private": true
+  "scan_include_private": true,
+  "scan_depth_per_chat": 10,
+  "export_parallel_chats": 2,
+  "export_include_media": true,
+  "export_message_limit": null
 }

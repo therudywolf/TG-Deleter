@@ -1,0 +1,15 @@
+# Release Notes
+
+## 2026-05-10
+
+- Added parallel streaming export for selected chats/channels.
+- Added per-account export folders with `messages.html`, `messages.jsonl`, optional media, and `manifest.json`.
+- Made scan pause/stop responsive inside chat history traversal.
+- Made long delete operations cancellable by account switch/close.
+- Fixed account identity leakage between switched accounts.
+- Fixed scan cache reads/writes to use explicit session keys.
+- Improved chat cards with latest found message preview and selected-card highlighting.
+- Added export settings: parallel chat count, media download toggle, and per-chat export limit.
+- Fixed avatar rendering by loading images through Pillow.
+- Removed tracked local profile/test-output artifacts and expanded `.gitignore`.
+- Added `.gitattributes`, README, and release notes for cleaner releases.
