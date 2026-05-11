@@ -23,6 +23,7 @@ from core import (
     set_me_from_dict,
     fetch_and_set_my_channels,
     save_account_profile,
+    list_export_dialogs,
     scan_all_dialogs,
     delete_message_ids,
     delete_all_my_in_chat_no_scan,
@@ -41,6 +42,7 @@ from ui.theme import PAD, PAD_SM, SIDEBAR_WIDTH, font
 from ui.cache_export import load_places_from_cache, save_places_to_cache, get_cache_mtime_str, clear_cache
 from ui.places_frame import PlacesFrame
 from ui.posts_frame import PostsFrame
+from ui.export_frame import ExportFrame
 from ui.sidebar_frame import SidebarFrame
 from ui.settings_frame import SettingsFrame
 
@@ -107,6 +109,17 @@ def worker_loop():
                 app = create_client(session)
                 async with app:
                     set_app(app)
+                    channels_ready = False
+                    async def ensure_channels_ready():
+                        nonlocal channels_ready
+                        if channels_ready:
+                            return
+                        try:
+                            await fetch_and_set_my_channels(app)
+                        except Exception as ch_err:
+                            log.warning("worker: fetch_and_set_my_channels skip: %s", ch_err)
+                        channels_ready = True
+
                     try:
                         me = await app.get_me()
                         me_dict = {
@@ -117,26 +130,26 @@ def worker_loop():
                             "phone_number": getattr(me, "phone_number", None) or None,
                         }
                         set_me_from_dict(me_dict)
-                        try:
-                            await fetch_and_set_my_channels(app)
-                        except Exception as ch_err:
-                            log.warning("worker: fetch_and_set_my_channels skip: %s", ch_err)
-                        avatar_path = None
-                        try:
-                            profile = await app.get_profile_photos(me.id, limit=1)
-                            if profile and getattr(profile, "photos", None) and len(profile.photos) > 0 and len(profile.photos[0]) > 0:
-                                photo = profile.photos[0][-1]
-                                temp_dir = os.path.join(_PROJECT_ROOT, "temp")
-                                os.makedirs(temp_dir, exist_ok=True)
-                                avatar_path = os.path.join(temp_dir, f"avatar_{session}_{me.id}.jpg")
-                                await app.download_media(photo.file_id, file_name=avatar_path)
-                                if not os.path.isfile(avatar_path):
-                                    avatar_path = None
-                        except Exception as av_err:
-                            log.debug("worker: avatar download skip: %s", av_err)
-                        if avatar_path:
-                            me_dict["avatar_path"] = avatar_path
                         response_queue.put(("me", me_dict, session))
+                        async def download_avatar():
+                            avatar_path = None
+                            try:
+                                profile = await app.get_profile_photos(me.id, limit=1)
+                                if profile and getattr(profile, "photos", None) and len(profile.photos) > 0 and len(profile.photos[0]) > 0:
+                                    photo = profile.photos[0][-1]
+                                    temp_dir = os.path.join(_PROJECT_ROOT, "temp")
+                                    os.makedirs(temp_dir, exist_ok=True)
+                                    avatar_path = os.path.join(temp_dir, f"avatar_{session}_{me.id}.jpg")
+                                    await app.download_media(photo.file_id, file_name=avatar_path)
+                                    if not os.path.isfile(avatar_path):
+                                        avatar_path = None
+                            except Exception as av_err:
+                                log.debug("worker: avatar download skip: %s", av_err)
+                            if avatar_path:
+                                updated = dict(me_dict)
+                                updated["avatar_path"] = avatar_path
+                                response_queue.put(("me", updated, session))
+                        asyncio.create_task(download_avatar())
                         log.debug("worker: sent me profile to GUI, session=%s", session)
                     except Exception as e:
                         log.warning("worker: get_me failed: %s", e)
@@ -155,6 +168,7 @@ def worker_loop():
                         log.debug("worker: request %s", req[0])
                         try:
                             if req[0] == "scan":
+                                await ensure_channels_ready()
                                 include_groups = req[1]
                                 include_channels = req[2]
                                 include_private = req[3]
@@ -180,18 +194,21 @@ def worker_loop():
                                 response_queue.put(("scan_done", places, stopped, session))
                                 log.debug("worker: put scan_done, places=%s stopped=%s", len(places), stopped)
                             elif req[0] == "delete_all_no_scan":
+                                await ensure_channels_ready()
                                 cid = req[1]
                                 response_queue.put(("delete_op_status", f"Удаление в чате {cid}..."))
                                 count = await delete_all_my_in_chat_no_scan(cid, pause_event=scan_paused, stop_event=scan_stop_requested)
                                 response_queue.put(("delete_all_no_scan_done", cid, count, scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_all_no_scan_done")
                             elif req[0] == "delete_here":
+                                await ensure_channels_ready()
                                 cid, ids = req[1], req[2]
                                 response_queue.put(("delete_op_status", f"Удаляю {len(ids)} сообщений в чате {cid}..."))
                                 deleted_ids = await delete_message_ids(cid, ids, pause_event=scan_paused, stop_event=scan_stop_requested)
                                 response_queue.put(("delete_done", cid, deleted_ids, scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_done")
                             elif req[0] == "delete_all_except":
+                                await ensure_channels_ready()
                                 except_cid = req[1]
                                 places_list = req[2]
                                 deleted_map = {}
@@ -211,6 +228,7 @@ def worker_loop():
                                 response_queue.put(("delete_all_except_done", deleted_map, scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_all_except_done")
                             elif req[0] == "delete_in_places":
+                                await ensure_channels_ready()
                                 chat_ids = req[1]
                                 total_deleted = 0
                                 for i, cid in enumerate(chat_ids):
@@ -243,6 +261,36 @@ def worker_loop():
                                 )
                                 response_queue.put(("export_done", root, manifest, scan_stop_requested.is_set()))
                                 log.debug("worker: put export_done, root=%s", root)
+                            elif req[0] == "list_export_dialogs":
+                                include_groups = req[1]
+                                include_channels = req[2]
+                                include_private = req[3]
+                                pause_ev = req[4]
+                                stop_ev = req[5]
+                                batch = []
+                                def flush_batch():
+                                    nonlocal batch
+                                    if batch:
+                                        response_queue.put(("export_dialogs_batch", batch))
+                                        batch = []
+                                def on_dialog(place):
+                                    batch.append(place)
+                                    if len(batch) >= 50:
+                                        flush_batch()
+                                def on_progress(n, title):
+                                    response_queue.put(("export_dialogs_progress", n, title))
+                                dialogs = await list_export_dialogs(
+                                    include_groups=include_groups,
+                                    include_channels=include_channels,
+                                    include_private=include_private,
+                                    pause_event=pause_ev,
+                                    stop_event=stop_ev,
+                                    progress_callback=on_dialog,
+                                    dialog_progress_callback=on_progress,
+                                )
+                                flush_batch()
+                                response_queue.put(("export_dialogs_done", dialogs, scan_stop_requested.is_set(), session))
+                                log.debug("worker: put export_dialogs_done, dialogs=%s", len(dialogs))
                         except Exception as e:
                             log.exception("worker error in %s: %s", req[0], e)
                             response_queue.put(("error", req[0], str(e)))
@@ -282,6 +330,7 @@ class App:
             on_quit=self._on_close,
             on_switch_account=self._on_switch_account,
             on_show_chats=self._show_places,
+            on_show_export=self._show_export,
             on_show_settings=self._show_settings,
             on_clear_cache=self._on_clear_cache,
             on_logout=self._on_logout,
@@ -305,6 +354,11 @@ class App:
             on_export_places=self._on_export_places,
         )
         self.posts_frame = PostsFrame(content, on_back=self._show_places, all_places_getter=lambda: self.places)
+        self.export_frame = ExportFrame(
+            content,
+            on_load_dialogs=self._on_load_export_dialogs,
+            on_export_places=self._on_export_places,
+        )
 
         self._log_visible = False
         self.log_frame = ctk.CTkFrame(content_holder, fg_color=("gray90", "gray15"), height=160)
@@ -327,6 +381,8 @@ class App:
             self.places_frame.pack(fill="both", expand=True)
             self.posts_frame.pack(fill="both", expand=True)
             self.posts_frame.pack_forget()
+            self.export_frame.pack(fill="both", expand=True)
+            self.export_frame.pack_forget()
             session = get_current_session()
             cached = load_places_from_cache(session)
             if cached:
@@ -359,6 +415,8 @@ class App:
         self.places_frame.pack(fill="both", expand=True)
         self.posts_frame.pack(fill="both", expand=True)
         self.posts_frame.pack_forget()
+        self.export_frame.pack(fill="both", expand=True)
+        self.export_frame.pack_forget()
         session = get_current_session()
         cached = load_places_from_cache(session)
         if cached:
@@ -378,6 +436,7 @@ class App:
     def _show_settings(self):
         self.places_frame.pack_forget()
         self.posts_frame.pack_forget()
+        self.export_frame.pack_forget()
         self.settings_frame.set_initial_setup(False)
         self.settings_frame.refresh_from_config()
         self.settings_frame.pack(fill="both", expand=True)
@@ -393,7 +452,14 @@ class App:
     def _show_places(self):
         self.settings_frame.pack_forget()
         self.posts_frame.pack_forget()
+        self.export_frame.pack_forget()
         self.places_frame.pack(fill="both", expand=True)
+
+    def _show_export(self):
+        self.settings_frame.pack_forget()
+        self.posts_frame.pack_forget()
+        self.places_frame.pack_forget()
+        self.export_frame.pack(fill="both", expand=True)
 
     def _on_switch_account(self, session_name):
         session_name = (session_name or "").strip()
@@ -404,6 +470,7 @@ class App:
             scan_stop_requested.set()
             scan_paused.clear()
             self.places_frame.status_label.configure(text=f"Останавливаю текущую операцию и переключаюсь на {session_name}...")
+            self.export_frame.status_label.configure(text=f"Останавливаю текущую операцию и переключаюсь на {session_name}...")
         request_queue.put(("switch_account", session_name))
 
     def _on_clear_cache(self):
@@ -442,6 +509,24 @@ class App:
         self.places = []
         self.places_frame.set_places(self.places)
 
+    def _on_load_export_dialogs(self, include_groups, include_channels, include_private):
+        if not get_current_session():
+            messagebox.showwarning("Экспорт", "Сначала добавьте аккаунт.")
+            self.export_frame.set_loading(False)
+            return
+        scan_paused.clear()
+        scan_stop_requested.clear()
+        self._operation_running = True
+        self._pending_switch_session = None
+        request_queue.put((
+            "list_export_dialogs",
+            include_groups,
+            include_channels,
+            include_private,
+            scan_paused,
+            scan_stop_requested,
+        ))
+
     def _on_export_places(self, output_dir, chat_ids):
         if not chat_ids:
             messagebox.showinfo("Экспорт", "Отметьте один или несколько чатов для экспорта.")
@@ -454,7 +539,9 @@ class App:
         self._operation_running = True
         self._pending_switch_session = None
         self.places_frame.set_scanning(True, label="Экспортирую")
+        self.export_frame.set_loading(True, label="Экспортирую")
         self.places_frame.status_label.configure(text=f"Экспорт выбранных чатов: {len(chat_ids)}...")
+        self.export_frame.status_label.configure(text=f"Экспорт выбранных чатов: {len(chat_ids)}...")
         request_queue.put(("export_chats", output_dir, chat_ids))
 
     def _open_place(self, place: Place):
@@ -484,8 +571,11 @@ class App:
                         self._append_log(msg[1] if len(msg) > 1 else "")
                     elif msg[0] == "me":
                         log.debug("Got me")
-                        self.me = msg[1]
+                        me = msg[1]
                         session = msg[2] if len(msg) > 2 else None
+                        if session and session != get_current_session():
+                            continue
+                        self.me = me
                         if session and self.me:
                             first = (self.me.get("first_name") or "").strip()
                             last = (self.me.get("last_name") or "").strip()
@@ -501,6 +591,7 @@ class App:
                         self._pending_switch_session = None
                         self._operation_running = False
                         self.places_frame.set_scanning(False)
+                        self.export_frame.set_loading(False)
                         self.places = []
                         self.places_frame.set_places(self.places)
                         session = msg[1]
@@ -522,6 +613,22 @@ class App:
                                 text="Аккаунт: %s. Нажмите «Сканировать» или «Обновить из кэша»." % (get_current_session() or "—")
                             )
                         self.sidebar.set_account(msg[1])
+                    elif msg[0] == "export_dialogs_progress":
+                        n, title = msg[1], msg[2]
+                        short = (title[:40] + "…") if len(title) > 40 else title
+                        self.export_frame.status_label.configure(text=f"Загружено диалогов: {n}. Текущий: {short}")
+                    elif msg[0] == "export_dialogs_batch":
+                        batch = msg[1]
+                        self.export_frame.append_dialogs(batch)
+                    elif msg[0] == "export_dialogs_done":
+                        dialogs = msg[1]
+                        stopped = msg[2] if len(msg) > 2 else False
+                        self._operation_running = False
+                        self.export_frame.set_loading(False)
+                        self.export_frame.dialogs = list(dialogs)
+                        self.export_frame.status_label.configure(
+                            text=("Список остановлен." if stopped else "Список загружен.") + f" Диалогов: {len(dialogs)}."
+                        )
                     elif msg[0] == "scan_progress":
                         log.debug("Got scan_progress")
                         n, title = msg[1], msg[2]
@@ -641,24 +748,29 @@ class App:
                         payload = msg[2] if len(msg) > 2 else {}
                         if kind == "chat_start":
                             self.places_frame.status_label.configure(text="Экспорт: %s..." % payload.get("title", payload.get("chat_id", "")))
+                            self.export_frame.status_label.configure(text="Экспорт: %s..." % payload.get("title", payload.get("chat_id", "")))
                         elif kind == "chat_progress":
-                            self.places_frame.status_label.configure(
-                                text="Экспорт: %s, сообщений: %s, медиа: %s"
-                                % (payload.get("title", ""), payload.get("messages", 0), payload.get("media", 0))
+                            status = "Экспорт: %s, сообщений: %s, медиа: %s" % (
+                                payload.get("title", ""),
+                                payload.get("messages", 0),
+                                payload.get("media", 0),
                             )
+                            self.places_frame.status_label.configure(text=status)
+                            self.export_frame.status_label.configure(text=status)
                         elif kind == "chat_done":
-                            self.places_frame.status_label.configure(
-                                text="Готов чат: %s, сообщений: %s"
-                                % (payload.get("title", ""), payload.get("messages", 0))
-                            )
+                            status = "Готов чат: %s, сообщений: %s" % (payload.get("title", ""), payload.get("messages", 0))
+                            self.places_frame.status_label.configure(text=status)
+                            self.export_frame.status_label.configure(text=status)
                     elif msg[0] == "export_done":
                         root, manifest = msg[1], msg[2]
                         stopped = msg[3] if len(msg) > 3 else False
                         self._operation_running = False
                         self.places_frame.set_scanning(False)
+                        self.export_frame.set_loading(False)
                         total_messages = manifest.get("total_messages", 0)
                         total_media = manifest.get("total_media", 0)
                         self.places_frame.status_label.configure(text=f"Экспорт готов: {root}")
+                        self.export_frame.status_label.configure(text=f"Экспорт готов: {root}")
                         messagebox.showinfo(
                             "Остановлено" if stopped else "Экспорт готов",
                             "Папка: %s\nСообщений: %s\nМедиа: %s" % (root, total_messages, total_media),
@@ -672,7 +784,12 @@ class App:
                             self.places_frame.status_label.configure(text="Ошибка сканирования")
                         if op == "export_chats":
                             self.places_frame.set_scanning(False)
+                            self.export_frame.set_loading(False)
                             self.places_frame.status_label.configure(text="Ошибка экспорта")
+                            self.export_frame.status_label.configure(text="Ошибка экспорта")
+                        if op == "list_export_dialogs":
+                            self.export_frame.set_loading(False)
+                            self.export_frame.status_label.configure(text="Ошибка загрузки списка")
                         self._operation_running = False
                         messagebox.showerror("Ошибка", err)
                 except Exception as e:

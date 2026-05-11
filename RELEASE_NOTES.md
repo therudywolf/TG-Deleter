@@ -13,3 +13,10 @@
 - Fixed avatar rendering by loading images through Pillow.
 - Removed tracked local profile/test-output artifacts and expanded `.gitignore`.
 - Added `.gitattributes`, README, and release notes for cleaner releases.
+
+## 2026-05-11
+
+- Added a dedicated exporter mode in the sidebar.
+- Exporter now loads all available dialogs without scanning message history for "my messages".
+- Moved expensive channel-rights discovery out of account switching; it now runs only before scan/delete operations that need ownership detection.
+- Reduced empty-state artifacts while streaming scan/export lists into the UI.

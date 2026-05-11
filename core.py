@@ -565,6 +565,29 @@ def _chat_type_str(chat) -> str:
     return "Чат"
 
 
+def _chat_type_key(chat) -> str:
+    t = getattr(chat, "type", None)
+    return str(t).lower() if t is not None else ""
+
+
+def _is_private_chat_type(chat) -> bool:
+    t = getattr(chat, "type", None)
+    key = _chat_type_key(chat)
+    return t in (ChatType.PRIVATE, ChatType.BOT) or key in ("private", "bot") or key.endswith(".private") or key.endswith(".bot")
+
+
+def _is_group_chat_type(chat) -> bool:
+    t = getattr(chat, "type", None)
+    key = _chat_type_key(chat)
+    return t in (ChatType.GROUP, ChatType.SUPERGROUP) or key in ("group", "supergroup", "megagroup") or key.endswith(".group") or key.endswith(".supergroup")
+
+
+def _is_channel_chat_type(chat) -> bool:
+    t = getattr(chat, "type", None)
+    key = _chat_type_key(chat)
+    return t == ChatType.CHANNEL or key == "channel" or key.endswith(".channel")
+
+
 async def check_if_mine(message):
     try:
         # Исходящее (я отправил) — в каналах from_user часто пустой, полагаемся на out/outgoing
@@ -724,12 +747,11 @@ async def scan_all_dialogs(
             break
 
         chat = dialog.chat
-        ct = getattr(chat, "type", None)
-        if ct in (ChatType.PRIVATE, ChatType.BOT) and not include_private:
+        if _is_private_chat_type(chat) and not include_private:
             continue
-        if ct in (ChatType.GROUP, ChatType.SUPERGROUP) and not include_groups:
+        if _is_group_chat_type(chat) and not include_groups:
             continue
-        if ct == ChatType.CHANNEL and not include_channels:
+        if _is_channel_chat_type(chat) and not include_channels:
             continue
 
         if not await _wait_if_paused(pause_event, stop_event):
@@ -794,6 +816,49 @@ async def scan_all_dialogs(
             if not await _sleep_responsive(get_scan_delay_between_chats(), pause_event, stop_event):
                 break
     log.debug("scan_all_dialogs done: всего мест %s", len(places))
+    return places
+
+
+async def list_export_dialogs(
+    include_groups=True,
+    include_channels=True,
+    include_private=True,
+    pause_event=None,
+    stop_event=None,
+    progress_callback=None,
+    dialog_progress_callback=None,
+):
+    """Быстро получить список диалогов для экспортера без обхода истории сообщений."""
+    places = []
+    n = 0
+    client = get_app()
+    if not client:
+        return places
+    async for dialog in client.get_dialogs():
+        if _is_stopped(stop_event):
+            break
+        if not await _wait_if_paused(pause_event, stop_event):
+            break
+        chat = dialog.chat
+        if _is_private_chat_type(chat) and not include_private:
+            continue
+        if _is_group_chat_type(chat) and not include_groups:
+            continue
+        if _is_channel_chat_type(chat) and not include_channels:
+            continue
+        place = Place(chat_id=chat.id, title=_chat_title(chat), type_str=_chat_type_str(chat), messages=[])
+        places.append(place)
+        n += 1
+        if progress_callback:
+            try:
+                progress_callback(place)
+            except Exception:
+                pass
+        if dialog_progress_callback:
+            try:
+                dialog_progress_callback(n, place.title)
+            except Exception:
+                pass
     return places
 
 

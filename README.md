@@ -36,10 +36,11 @@ On Windows, `run_project.bat` creates/uses `venv` and starts the GUI.
 
 ## Export
 
-1. Scan dialogs.
-2. Mark chats with checkboxes.
-3. Click `Экспорт выбранных`.
-4. Pick an output folder.
+1. Open `Экспорт` in the left sidebar.
+2. Click `Загрузить список` to fetch all available dialogs without scanning message history.
+3. Filter/search the list and mark chats with checkboxes.
+4. Click `Экспорт выбранных`.
+5. Pick an output folder.
 
 The app creates a timestamped `TG_Deleter_export_*` folder. Export is intentionally streamed to disk so large chats do not have to fit in memory.
 

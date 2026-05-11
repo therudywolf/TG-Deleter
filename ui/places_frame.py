@@ -307,6 +307,9 @@ class PlacesFrame(ctk.CTkFrame):
             return
         if self.current_section == "private" and place.type_str != "Личный":
             return
+        for widget in self.scroll.winfo_children():
+            if not getattr(widget, "place_data", None):
+                widget.destroy()
         self._build_place_card(place)
 
     def _apply_sort_filter(self):

@@ -22,7 +22,7 @@ def _avatar_image(path, size):
 class SidebarFrame(ctk.CTkFrame):
     """Левая панель: меню аккаунтов с аватарками, профиль, Чаты, Сбросить кэш, Выйти из аккаунта, Удалить аккаунт, Выход."""
 
-    def __init__(self, parent, on_quit=None, on_switch_account=None, on_show_chats=None, on_show_settings=None, on_show_log=None, on_clear_cache=None, on_logout=None, **kw):
+    def __init__(self, parent, on_quit=None, on_switch_account=None, on_show_chats=None, on_show_export=None, on_show_settings=None, on_show_log=None, on_clear_cache=None, on_logout=None, **kw):
         kw.pop("width", None)
         super().__init__(parent, width=SIDEBAR_WIDTH, fg_color=SIDEBAR_BG, corner_radius=0,
                          border_width=1, border_color=SIDEBAR_BORDER, **kw)
@@ -30,6 +30,7 @@ class SidebarFrame(ctk.CTkFrame):
         self.on_quit = on_quit
         self.on_switch_account = on_switch_account
         self.on_show_chats = on_show_chats
+        self.on_show_export = on_show_export
         self.on_show_settings = on_show_settings
         self.on_show_log = on_show_log
         self.on_clear_cache = on_clear_cache
@@ -65,6 +66,11 @@ class SidebarFrame(ctk.CTkFrame):
             fg_color=ACCENT, hover_color=ACCENT_HOVER, anchor="w"
         )
         self.btn_chats.pack(fill="x", padx=PAD_SM, pady=2)
+        if self.on_show_export:
+            ctk.CTkButton(
+                self, text="Экспорт", command=self.on_show_export, corner_radius=BTN_RADIUS, height=36,
+                fg_color=("gray70", "gray30"), hover_color=("gray65", "gray35"), anchor="w"
+            ).pack(fill="x", padx=PAD_SM, pady=2)
         if self.on_show_settings:
             ctk.CTkButton(
                 self, text="Настройки", command=self.on_show_settings, corner_radius=BTN_RADIUS, height=36,
