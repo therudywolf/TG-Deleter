@@ -376,8 +376,10 @@ class App:
         log.addHandler(handler)
 
         if not has_api:
+            self.sidebar.set_active_section("settings")
             self.settings_frame.pack(fill="both", expand=True)
         else:
+            self.sidebar.set_active_section("chats")
             self.places_frame.pack(fill="both", expand=True)
             self.posts_frame.pack(fill="both", expand=True)
             self.posts_frame.pack_forget()
@@ -412,6 +414,7 @@ class App:
     def _on_settings_saved(self):
         """После сохранения настроек: если раньше не было API — показать основной экран и запустить воркер."""
         self.settings_frame.pack_forget()
+        self.sidebar.set_active_section("chats")
         self.places_frame.pack(fill="both", expand=True)
         self.posts_frame.pack(fill="both", expand=True)
         self.posts_frame.pack_forget()
@@ -437,6 +440,7 @@ class App:
         self.places_frame.pack_forget()
         self.posts_frame.pack_forget()
         self.export_frame.pack_forget()
+        self.sidebar.set_active_section("settings")
         self.settings_frame.set_initial_setup(False)
         self.settings_frame.refresh_from_config()
         self.settings_frame.pack(fill="both", expand=True)
@@ -453,12 +457,14 @@ class App:
         self.settings_frame.pack_forget()
         self.posts_frame.pack_forget()
         self.export_frame.pack_forget()
+        self.sidebar.set_active_section("chats")
         self.places_frame.pack(fill="both", expand=True)
 
     def _show_export(self):
         self.settings_frame.pack_forget()
         self.posts_frame.pack_forget()
         self.places_frame.pack_forget()
+        self.sidebar.set_active_section("export")
         self.export_frame.pack(fill="both", expand=True)
 
     def _on_switch_account(self, session_name):
@@ -471,6 +477,9 @@ class App:
             scan_paused.clear()
             self.places_frame.status_label.configure(text=f"Останавливаю текущую операцию и переключаюсь на {session_name}...")
             self.export_frame.status_label.configure(text=f"Останавливаю текущую операцию и переключаюсь на {session_name}...")
+        else:
+            self.places_frame.status_label.configure(text=f"Переключаюсь на {session_name}...")
+            self.export_frame.status_label.configure(text=f"Переключаюсь на {session_name}...")
         request_queue.put(("switch_account", session_name))
 
     def _on_clear_cache(self):
@@ -594,6 +603,7 @@ class App:
                         self.export_frame.set_loading(False)
                         self.places = []
                         self.places_frame.set_places(self.places)
+                        self.export_frame.set_dialogs([])
                         session = msg[1]
                         cached = load_places_from_cache(session)
                         if cached:

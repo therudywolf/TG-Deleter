@@ -20,3 +20,5 @@
 - Exporter now loads all available dialogs without scanning message history for "my messages".
 - Moved expensive channel-rights discovery out of account switching; it now runs only before scan/delete operations that need ownership detection.
 - Reduced empty-state artifacts while streaming scan/export lists into the UI.
+- Added persistent export selection, counters, active sidebar sections, and render limits for large dialog lists.
+- Disabled Pyrogram updates for the app client to reduce account-switch overhead.

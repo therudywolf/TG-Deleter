@@ -8,7 +8,7 @@ from PIL import Image
 
 from core import get_current_session, get_accounts_list, add_account, remove_account, get_account_profile, get_project_root, set_current_session, get_api_id, get_api_hash
 from ui.login_dialog import LoginDialog
-from ui.theme import PAD, PAD_SM, BTN_RADIUS, RADIUS, SIDEBAR_WIDTH, ACCENT, ACCENT_HOVER, SIDEBAR_BG, SIDEBAR_BORDER, font
+from ui.theme import PAD, PAD_SM, BTN_RADIUS, RADIUS, SIDEBAR_WIDTH, ACCENT, ACCENT_HOVER, SIDEBAR_BG, SIDEBAR_BORDER, ACTIVE_BG, font
 
 _PROJECT_ROOT = get_project_root()
 AVATAR_SIZE_SMALL = 36
@@ -36,6 +36,7 @@ class SidebarFrame(ctk.CTkFrame):
         self.on_clear_cache = on_clear_cache
         self.on_logout = on_logout
         self._updating_account = False
+        self._nav_buttons = {}
 
         ctk.CTkLabel(self, text="Аккаунты", font=font(12, "bold"), anchor="w").pack(fill="x", padx=PAD, pady=(PAD, PAD_SM))
         self.accounts_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent", height=160)
@@ -66,16 +67,21 @@ class SidebarFrame(ctk.CTkFrame):
             fg_color=ACCENT, hover_color=ACCENT_HOVER, anchor="w"
         )
         self.btn_chats.pack(fill="x", padx=PAD_SM, pady=2)
+        self._nav_buttons["chats"] = self.btn_chats
         if self.on_show_export:
-            ctk.CTkButton(
+            btn = ctk.CTkButton(
                 self, text="Экспорт", command=self.on_show_export, corner_radius=BTN_RADIUS, height=36,
                 fg_color=("gray70", "gray30"), hover_color=("gray65", "gray35"), anchor="w"
-            ).pack(fill="x", padx=PAD_SM, pady=2)
+            )
+            btn.pack(fill="x", padx=PAD_SM, pady=2)
+            self._nav_buttons["export"] = btn
         if self.on_show_settings:
-            ctk.CTkButton(
+            btn = ctk.CTkButton(
                 self, text="Настройки", command=self.on_show_settings, corner_radius=BTN_RADIUS, height=36,
                 fg_color=("gray70", "gray30"), hover_color=("gray65", "gray35"), anchor="w"
-            ).pack(fill="x", padx=PAD_SM, pady=2)
+            )
+            btn.pack(fill="x", padx=PAD_SM, pady=2)
+            self._nav_buttons["settings"] = btn
         if self.on_show_log:
             ctk.CTkButton(
                 self, text="Лог", command=self.on_show_log, corner_radius=BTN_RADIUS, height=36,
@@ -96,6 +102,15 @@ class SidebarFrame(ctk.CTkFrame):
     def _on_chats_click(self):
         if self.on_show_chats:
             self.on_show_chats()
+
+    def set_active_section(self, key):
+        for section, btn in self._nav_buttons.items():
+            if not btn.winfo_exists():
+                continue
+            if section == key:
+                btn.configure(fg_color=ACTIVE_BG, hover_color=ACCENT_HOVER)
+            else:
+                btn.configure(fg_color=("gray70", "gray30"), hover_color=("gray65", "gray35"))
 
     def _refresh_accounts_list(self):
         for w in self.accounts_scroll.winfo_children():

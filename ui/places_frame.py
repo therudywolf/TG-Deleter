@@ -23,6 +23,8 @@ from ui.queues import request_queue, scan_paused, scan_stop_requested
 from ui.cache_export import export_places_to_csv, export_places_to_json
 from ui.tooltip import bind_tooltip
 
+VISIBLE_LIMIT = 400
+
 
 class PlacesFrame(ctk.CTkFrame):
     """Экран 1: Чаты с вашими сообщениями — скан, фильтры, пауза, карточки чатов, сортировка, поиск."""
@@ -36,6 +38,7 @@ class PlacesFrame(ctk.CTkFrame):
         self.places: list = []
         self._scanning = False
         self._paused = False
+        self._selected_chat_ids = set()
 
         # Заголовок
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -118,6 +121,8 @@ class PlacesFrame(ctk.CTkFrame):
 
         self.status_label = ctk.CTkLabel(self, text="Здесь появятся чаты с вашими сообщениями. Нажмите «Сканировать» или «Обновить из кэша».", text_color="gray")
         self.status_label.pack(fill="x", pady=(0, PAD_SM))
+        self.counter_label = ctk.CTkLabel(self, text="", text_color="gray", font=font(12))
+        self.counter_label.pack(fill="x", pady=(0, PAD_SM))
 
         # Меню разделов
         self.current_section = "all"
@@ -259,6 +264,8 @@ class PlacesFrame(ctk.CTkFrame):
 
     def set_places(self, places):
         self.places = list(places)
+        existing = {p.chat_id for p in self.places}
+        self._selected_chat_ids.intersection_update(existing)
         self._update_section_buttons()
         self._apply_sort_filter()
 
@@ -268,8 +275,15 @@ class PlacesFrame(ctk.CTkFrame):
         card.pack(fill="x", pady=4, padx=2)
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=PAD, pady=PAD_SM)
-        var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(row, text="", variable=var, width=24, height=24).pack(side="left", padx=(0, PAD_SM))
+        var = ctk.BooleanVar(value=place.chat_id in self._selected_chat_ids)
+        ctk.CTkCheckBox(
+            row,
+            text="",
+            variable=var,
+            width=24,
+            height=24,
+            command=lambda cid=place.chat_id, v=var: self._on_card_check(cid, v.get()),
+        ).pack(side="left", padx=(0, PAD_SM))
         title_short = (place.title[:50] + "…") if len(place.title) > 50 else place.title
         text_col = ctk.CTkFrame(row, fg_color="transparent")
         text_col.pack(side="left", fill="x", expand=True)
@@ -310,7 +324,10 @@ class PlacesFrame(ctk.CTkFrame):
         for widget in self.scroll.winfo_children():
             if not getattr(widget, "place_data", None):
                 widget.destroy()
-        self._build_place_card(place)
+        rendered_count = len([w for w in self.scroll.winfo_children() if getattr(w, "place_data", None)])
+        if rendered_count < VISIBLE_LIMIT:
+            self._build_place_card(place)
+        self._update_counter()
 
     def _apply_sort_filter(self):
         """Перестроить список с учётом раздела, сортировки и поиска."""
@@ -336,9 +353,20 @@ class PlacesFrame(ctk.CTkFrame):
             self._show_empty_places()
             self._selected_place = None
             return
-        for p in items:
+        rendered = items[:VISIBLE_LIMIT]
+        for p in rendered:
             self._build_place_card(p)
+        if len(items) > VISIBLE_LIMIT:
+            more = ctk.CTkFrame(self.scroll, fg_color="transparent")
+            more.pack(fill="x", pady=PAD_SM)
+            ctk.CTkLabel(
+                more,
+                text=f"Показаны первые {VISIBLE_LIMIT} из {len(items)}. Уточните поиск или раздел.",
+                font=font(12),
+                text_color="gray",
+            ).pack(anchor="center")
         self._selected_place = None
+        self._update_counter(visible=len(items))
 
     def _show_empty_places(self):
         """Показать пустое состояние в списке чатов."""
@@ -348,9 +376,10 @@ class PlacesFrame(ctk.CTkFrame):
         if self.places:
             msg = "По выбранным фильтрам чатов не найдено.\nИзмените раздел или поиск."
         ctk.CTkLabel(empty, text=msg, font=font(14), text_color="gray", justify="center").pack(expand=True)
+        self._update_counter(visible=0)
 
     def _delete_in_selected_places(self):
-        selected = self._selected_chat_ids()
+        selected = list(self._selected_chat_ids)
         if not selected:
             messagebox.showinfo("Удаление", "Отметьте чаты для удаления (галочка на карточке).")
             return
@@ -360,15 +389,8 @@ class PlacesFrame(ctk.CTkFrame):
         scan_stop_requested.clear()
         request_queue.put(("delete_in_places", selected))
 
-    def _selected_chat_ids(self):
-        selected = []
-        for card in self.scroll.winfo_children():
-            if getattr(card, "place_data", None) and getattr(card, "place_var", None) and card.place_var.get():
-                selected.append(card.place_data.chat_id)
-        return selected
-
     def _export_selected_places(self):
-        selected = self._selected_chat_ids()
+        selected = list(self._selected_chat_ids)
         if not selected:
             messagebox.showinfo("Экспорт", "Отметьте чаты для экспорта (галочка на карточке).")
             return
@@ -377,6 +399,20 @@ class PlacesFrame(ctk.CTkFrame):
         folder = filedialog.askdirectory(title="Папка для экспорта")
         if folder:
             self.on_export_places(folder, selected)
+
+    def _on_card_check(self, chat_id, checked):
+        if checked:
+            self._selected_chat_ids.add(chat_id)
+        else:
+            self._selected_chat_ids.discard(chat_id)
+        self._update_counter()
+
+    def _update_counter(self, visible=None):
+        if visible is None:
+            visible = len([w for w in self.scroll.winfo_children() if getattr(w, "place_data", None)])
+        self.counter_label.configure(
+            text=f"Чатов: {len(self.places)} · видно: {visible} · выбрано: {len(self._selected_chat_ids)}"
+        )
 
     def _select_card(self, event):
         w = event.widget

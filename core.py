@@ -449,7 +449,7 @@ def create_client(session_name):
     api_hash = get_api_hash()
     if not api_id or not api_hash:
         raise ValueError("Введите API ID и API Hash в настройках приложения.")
-    return Client(session_name, api_id=api_id, api_hash=api_hash, workdir=get_project_root())
+    return Client(session_name, api_id=api_id, api_hash=api_hash, workdir=get_project_root(), no_updates=True)
 
 
 def set_app(client):

@@ -13,11 +13,17 @@ from ui.theme import (
     ACCENT,
     ACCENT_HOVER,
     CARD_BG,
+    ROW_HOVER,
     SCROLL_FRAME_BG,
     BTN_SECONDARY,
+    PANEL_BG,
+    BORDER,
+    TEXT_MUTED,
     font,
 )
 from ui.queues import scan_paused, scan_stop_requested
+
+VISIBLE_LIMIT = 500
 
 
 class ExportFrame(ctk.CTkFrame):
@@ -28,6 +34,7 @@ class ExportFrame(ctk.CTkFrame):
         self.on_load_dialogs = on_load_dialogs
         self.on_export_places = on_export_places
         self.dialogs: list[Place] = []
+        self.selected_ids: set[int] = set()
         self._loading = False
         self._paused = False
         self._selected_card = None
@@ -35,8 +42,10 @@ class ExportFrame(ctk.CTkFrame):
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", pady=(0, PAD_SM))
         ctk.CTkLabel(head, text="Экспорт", font=font(20, "bold")).pack(side="left")
+        self.counter_label = ctk.CTkLabel(head, text="", text_color=TEXT_MUTED, font=font(12))
+        self.counter_label.pack(side="right")
 
-        controls = ctk.CTkFrame(self, fg_color=("gray92", "gray18"), corner_radius=RADIUS, border_width=1, border_color=("gray85", "gray25"))
+        controls = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=RADIUS, border_width=1, border_color=BORDER)
         controls.pack(fill="x", pady=(0, PAD_SM))
         inner = ctk.CTkFrame(controls, fg_color="transparent")
         inner.pack(fill="x", padx=PAD, pady=PAD_SM)
@@ -72,6 +81,7 @@ class ExportFrame(ctk.CTkFrame):
             width=160,
             height=36,
             fg_color=BTN_SECONDARY,
+            state="disabled",
         )
         self.export_btn.pack(side="right", padx=PAD_SM)
         self.pause_btn = ctk.CTkButton(
@@ -139,13 +149,22 @@ class ExportFrame(ctk.CTkFrame):
         self.progress.pack(fill="x", pady=(0, PAD))
         self.progress.pack_forget()
 
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color=SCROLL_FRAME_BG, corner_radius=RADIUS)
+        header = ctk.CTkFrame(self, fg_color=("gray85", "gray16"), corner_radius=0, height=28)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkLabel(header, text="", width=42).pack(side="left")
+        ctk.CTkLabel(header, text="Диалог", anchor="w", font=font(12, "bold"), text_color=TEXT_MUTED).pack(side="left", fill="x", expand=True, padx=(0, PAD_SM))
+        ctk.CTkLabel(header, text="Тип", width=130, anchor="w", font=font(12, "bold"), text_color=TEXT_MUTED).pack(side="right", padx=(0, PAD_SM))
+
+        self.scroll = ctk.CTkScrollableFrame(self, fg_color=SCROLL_FRAME_BG, corner_radius=0)
         self.scroll.pack(fill="both", expand=True)
+        self._update_counters()
 
     def _load_dialogs(self):
         scan_paused.clear()
         scan_stop_requested.clear()
         self.dialogs = []
+        self.selected_ids.clear()
         self._apply_filter()
         self.set_loading(True, "Загружаю")
         self.status_label.configure(text="Загружаю список диалогов...")
@@ -164,7 +183,7 @@ class ExportFrame(ctk.CTkFrame):
         else:
             scan_paused.clear()
             self.load_btn.configure(state="normal", text="Загрузить список")
-            self.export_btn.configure(state="normal")
+            self.export_btn.configure(state="normal" if self.selected_ids else "disabled")
             self.pause_btn.configure(state="disabled", text="Пауза")
             self.stop_btn.configure(state="disabled")
             self.progress.stop()
@@ -195,6 +214,8 @@ class ExportFrame(ctk.CTkFrame):
 
     def set_dialogs(self, dialogs):
         self.dialogs = list(dialogs)
+        existing = {p.chat_id for p in self.dialogs}
+        self.selected_ids.intersection_update(existing)
         self._apply_filter()
 
     def append_dialogs(self, dialogs):
@@ -203,9 +224,13 @@ class ExportFrame(ctk.CTkFrame):
             for widget in self.scroll.winfo_children():
                 if not getattr(widget, "place_data", None):
                     widget.destroy()
+        rendered_count = len([w for w in self.scroll.winfo_children() if getattr(w, "place_data", None)])
         for place in dialogs:
             if self._matches(place):
-                self._build_card(place)
+                if rendered_count < VISIBLE_LIMIT:
+                    self._build_card(place)
+                    rendered_count += 1
+        self._update_counters()
 
     def _matches(self, place: Place):
         section = self.section_var.get()
@@ -227,20 +252,41 @@ class ExportFrame(ctk.CTkFrame):
             empty = ctk.CTkFrame(self.scroll, fg_color="transparent")
             empty.pack(fill="both", expand=True, pady=PAD * 3)
             ctk.CTkLabel(empty, text="Список пуст.", font=font(14), text_color="gray").pack(expand=True)
+            self._update_counters(visible=0)
             return
-        for place in items:
+        rendered = items[:VISIBLE_LIMIT]
+        for place in rendered:
             self._build_card(place)
+        if len(items) > VISIBLE_LIMIT:
+            more = ctk.CTkFrame(self.scroll, fg_color="transparent")
+            more.pack(fill="x", pady=PAD_SM)
+            ctk.CTkLabel(
+                more,
+                text=f"Показаны первые {VISIBLE_LIMIT} из {len(items)}. Уточните поиск или раздел.",
+                font=font(12),
+                text_color=TEXT_MUTED,
+            ).pack(anchor="center")
+        self._update_counters(visible=len(items))
 
     def _build_card(self, place: Place):
-        card = ctk.CTkFrame(self.scroll, corner_radius=RADIUS, fg_color=CARD_BG, cursor="hand2")
-        card.pack(fill="x", pady=3, padx=2)
+        card = ctk.CTkFrame(self.scroll, corner_radius=0, fg_color=CARD_BG, cursor="hand2", height=38)
+        card.pack(fill="x", pady=(0, 1), padx=0)
+        card.pack_propagate(False)
         row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=PAD, pady=PAD_SM)
-        var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(row, text="", variable=var, width=24, height=24).pack(side="left", padx=(0, PAD_SM))
+        row.pack(fill="both", expand=True, padx=PAD_SM)
+        var = ctk.BooleanVar(value=place.chat_id in self.selected_ids)
+        cb = ctk.CTkCheckBox(
+            row,
+            text="",
+            variable=var,
+            width=24,
+            height=24,
+            command=lambda cid=place.chat_id, v=var: self._on_check(cid, v.get()),
+        )
+        cb.pack(side="left", padx=(0, PAD_SM))
         title_short = (place.title[:72] + "…") if len(place.title) > 72 else place.title
-        ctk.CTkLabel(row, text=title_short, anchor="w", font=font(13, "bold")).pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(row, text=place.type_str, anchor="e", font=font(12), text_color="gray").pack(side="right", padx=PAD_SM)
+        ctk.CTkLabel(row, text=title_short, anchor="w", font=font(13)).pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(row, text=place.type_str, width=130, anchor="w", font=font(12), text_color=TEXT_MUTED).pack(side="right")
         card.place_data = place
         card.place_var = var
         card.bind("<Button-1>", self._select_card)
@@ -255,20 +301,37 @@ class ExportFrame(ctk.CTkFrame):
             return
         if self._selected_card is not None and self._selected_card.winfo_exists():
             self._selected_card.configure(fg_color=CARD_BG)
-        widget.configure(fg_color=("gray75", "gray28"))
+        widget.configure(fg_color=ROW_HOVER)
         self._selected_card = widget
 
     def _set_visible_checks(self, value: bool):
         for card in self.scroll.winfo_children():
-            if getattr(card, "place_var", None):
+            if getattr(card, "place_var", None) and getattr(card, "place_data", None):
                 card.place_var.set(value)
+                if value:
+                    self.selected_ids.add(card.place_data.chat_id)
+                else:
+                    self.selected_ids.discard(card.place_data.chat_id)
+        self._update_counters()
 
     def _selected_chat_ids(self):
-        return [
-            card.place_data.chat_id
-            for card in self.scroll.winfo_children()
-            if getattr(card, "place_data", None) and getattr(card, "place_var", None) and card.place_var.get()
-        ]
+        return list(self.selected_ids)
+
+    def _on_check(self, chat_id, checked):
+        if checked:
+            self.selected_ids.add(chat_id)
+        else:
+            self.selected_ids.discard(chat_id)
+        self._update_counters()
+
+    def _update_counters(self, visible=None):
+        if visible is None:
+            visible = len([p for p in self.dialogs if self._matches(p)])
+        selected = len(self.selected_ids)
+        total = len(self.dialogs)
+        self.counter_label.configure(text=f"Всего: {total} · видно: {visible} · выбрано: {selected}")
+        if not self._loading:
+            self.export_btn.configure(state="normal" if selected else "disabled")
 
     def _export_selected(self):
         selected = self._selected_chat_ids()

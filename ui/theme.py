@@ -10,10 +10,10 @@ ctk.set_default_color_theme("dark-blue")
 
 FONT_FAMILY = "Segoe UI Variable" if sys.platform == "win32" else None
 
-# Отступы и скругления (TG Desktop)
+# Отступы и скругления
 PAD = 16
 PAD_SM = 8
-RADIUS = 12
+RADIUS = 8
 BTN_RADIUS = 8
 SIDEBAR_WIDTH = 260
 
@@ -31,6 +31,11 @@ SIDEBAR_BORDER = ("#DEDEDE", "#2B5278")
 CARD_BG = ("gray85", "gray20")
 SCROLL_FRAME_BG = ("gray90", "gray17")
 ROW_BG = ("gray92", "gray22")
+ROW_HOVER = ("gray78", "gray27")
+PANEL_BG = ("gray92", "gray18")
+BORDER = ("gray82", "gray27")
+TEXT_MUTED = ("gray40", "gray65")
+ACTIVE_BG = ("#2AABEE", "#2AABEE")
 
 # Вторичные кнопки
 BTN_SECONDARY = ("gray65", "gray30")
