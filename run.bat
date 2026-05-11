@@ -19,7 +19,7 @@ goto :run
 
 :install_deps
 echo [TG Deleter] Ustanavlivayu zavisimosti...
-venv\Scripts\pip.exe install -r requirements.txt
+venv\Scripts\pip.exe install --no-cache-dir -r requirements.txt
 if errorlevel 1 goto :deps_fail
 
 :run
