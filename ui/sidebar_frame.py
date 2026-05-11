@@ -2,6 +2,7 @@
 Левая панель: аккаунты (список с аватаркой и именем), профиль, навигация, кнопки выхода и кэша.
 """
 import os
+import time
 import customtkinter as ctk
 from tkinter import messagebox, simpledialog
 from PIL import Image
@@ -12,6 +13,22 @@ from ui.theme import PAD, PAD_SM, BTN_RADIUS, RADIUS, SIDEBAR_WIDTH, ACCENT, ACC
 
 _PROJECT_ROOT = get_project_root()
 AVATAR_SIZE_SMALL = 36
+
+
+def _get_cached_avatar(session_name: str) -> str | None:
+    """Return avatar path if it exists and is less than 24h old."""
+    profile = get_account_profile(session_name)
+    avatar_path = profile.get("avatar_path")
+    if not avatar_path:
+        return None
+    if not os.path.isabs(avatar_path):
+        avatar_path = os.path.join(_PROJECT_ROOT, avatar_path)
+    if not os.path.isfile(avatar_path):
+        return None
+    age = time.time() - os.path.getmtime(avatar_path)
+    if age > 86400:
+        return None
+    return avatar_path
 
 
 def _avatar_image(path, size):
@@ -37,6 +54,7 @@ class SidebarFrame(ctk.CTkFrame):
         self.on_logout = on_logout
         self._updating_account = False
         self._nav_buttons = {}
+        self._log_active = False
 
         ctk.CTkLabel(self, text="Аккаунты", font=font(12, "bold"), anchor="w").pack(fill="x", padx=PAD, pady=(PAD, PAD_SM))
         self.accounts_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent", height=160)
@@ -58,7 +76,13 @@ class SidebarFrame(ctk.CTkFrame):
         self.username_label = ctk.CTkLabel(self, text="", font=font(12), text_color="gray", wraplength=SIDEBAR_WIDTH - PAD * 2)
         self.username_label.pack(fill="x", padx=PAD, pady=(0, 2))
         self.phone_label = ctk.CTkLabel(self, text="", font=font(11), text_color="gray", wraplength=SIDEBAR_WIDTH - PAD * 2)
-        self.phone_label.pack(fill="x", padx=PAD, pady=(0, PAD))
+        self.phone_label.pack(fill="x", padx=PAD, pady=(0, 2))
+        self.status_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.status_frame.pack(fill="x", padx=PAD, pady=(0, 2))
+        self.status_dot = ctk.CTkLabel(self.status_frame, text="●", font=font(10), text_color=("gray60", "gray50"), width=16)
+        self.status_dot.pack(side="left")
+        self.status_text = ctk.CTkLabel(self.status_frame, text="Не подключён", font=font(11), text_color="gray")
+        self.status_text.pack(side="left", padx=(2, 0))
         sep = ctk.CTkFrame(self, height=1, fg_color=("gray70", "gray35"))
         sep.pack(fill="x", padx=PAD, pady=PAD_SM)
         ctk.CTkLabel(self, text="Разделы", font=font(12, "bold"), anchor="w").pack(fill="x", padx=PAD, pady=(0, PAD_SM))
@@ -83,10 +107,12 @@ class SidebarFrame(ctk.CTkFrame):
             btn.pack(fill="x", padx=PAD_SM, pady=2)
             self._nav_buttons["settings"] = btn
         if self.on_show_log:
-            ctk.CTkButton(
-                self, text="Лог", command=self.on_show_log, corner_radius=BTN_RADIUS, height=36,
+            btn_log = ctk.CTkButton(
+                self, text="Лог", command=self._on_log_click, corner_radius=BTN_RADIUS, height=36,
                 fg_color=("gray70", "gray30"), hover_color=("gray65", "gray35"), anchor="w"
-            ).pack(fill="x", padx=PAD_SM, pady=2)
+            )
+            btn_log.pack(fill="x", padx=PAD_SM, pady=2)
+            self._nav_buttons["log"] = btn_log
         spacer = ctk.CTkFrame(self, fg_color="transparent")
         spacer.pack(fill="both", expand=True)
         bottom = ctk.CTkFrame(self, fg_color="transparent")
@@ -103,9 +129,31 @@ class SidebarFrame(ctk.CTkFrame):
         if self.on_show_chats:
             self.on_show_chats()
 
+    def _on_log_click(self):
+        self._log_active = not self._log_active
+        if "log" in self._nav_buttons:
+            btn = self._nav_buttons["log"]
+            if self._log_active:
+                btn.configure(fg_color=ACTIVE_BG, hover_color=ACCENT_HOVER)
+            else:
+                btn.configure(fg_color=("gray70", "gray30"), hover_color=("gray65", "gray35"))
+        if self.on_show_log:
+            self.on_show_log()
+
+    def set_connection_status(self, connected: bool):
+        """Update the connection indicator dot and text."""
+        if connected:
+            self.status_dot.configure(text_color=("#00C853", "#00E676"))
+            self.status_text.configure(text="Подключён")
+        else:
+            self.status_dot.configure(text_color=("gray60", "gray50"))
+            self.status_text.configure(text="Не подключён")
+
     def set_active_section(self, key):
         for section, btn in self._nav_buttons.items():
             if not btn.winfo_exists():
+                continue
+            if section == "log":
                 continue
             if section == key:
                 btn.configure(fg_color=ACTIVE_BG, hover_color=ACCENT_HOVER)
@@ -119,9 +167,7 @@ class SidebarFrame(ctk.CTkFrame):
         for session_name in get_accounts_list():
             profile = get_account_profile(session_name)
             display_name = (profile.get("display_name") or "").strip() or (profile.get("username") and f"@{profile.get('username')}") or session_name[:20] + ("…" if len(session_name) > 20 else "")
-            avatar_path = profile.get("avatar_path")
-            if avatar_path and not os.path.isabs(avatar_path):
-                avatar_path = os.path.join(_PROJECT_ROOT, avatar_path)
+            avatar_path = _get_cached_avatar(session_name)
             is_current = session_name == current
             row = ctk.CTkFrame(self.accounts_scroll, fg_color=(ACCENT, ACCENT) if is_current else ("gray78", "gray28"), corner_radius=RADIUS, height=AVATAR_SIZE_SMALL + 8, cursor="hand2")
             row.pack_propagate(False)
@@ -245,6 +291,7 @@ class SidebarFrame(ctk.CTkFrame):
             )
             self.username_label.configure(text="")
             self.phone_label.configure(text="")
+            self.set_connection_status(False)
             return
         first = (me_dict.get("first_name") or "").strip()
         last = (me_dict.get("last_name") or "").strip()
@@ -254,3 +301,4 @@ class SidebarFrame(ctk.CTkFrame):
         self.username_label.configure(text=f"@{username}" if username else "")
         phone = me_dict.get("phone_number")
         self.phone_label.configure(text=phone or "")
+        self.set_connection_status(True)

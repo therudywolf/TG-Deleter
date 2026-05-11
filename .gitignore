@@ -13,6 +13,7 @@ __pycache__/
 .pytest_cache/
 scan_cache.json
 scan_cache_*.json
+window_state.json
 temp/
 venv/
 .venv/

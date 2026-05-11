@@ -1,6 +1,8 @@
 """
 Ядро TG Deleter: api_config.json (API и скан), config.json (аккаунты/сессия), Pyrogram-клиент.
 """
+__version__ = "1.1.0"
+
 import os
 import sys
 import json
@@ -9,9 +11,11 @@ import asyncio
 import re
 import html
 import time
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait
@@ -43,6 +47,48 @@ _APP_DEFAULTS = {
 }
 _api_config_cache = None
 _app_config_cache = None
+
+
+class AppState:
+    """Thread-safe container for current user identity and Pyrogram client."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.user_id: int | None = None
+        self.username: str | None = None
+        self.first_name: str | None = None
+        self.last_name: str | None = None
+        self.channel_ids: set[int] = set()
+        self.client: Client | None = None
+
+    def set_me(self, me_dict: dict | None) -> None:
+        with self._lock:
+            if me_dict:
+                self.user_id = me_dict.get("id")
+                self.username = (me_dict.get("username") or "").strip() or None
+                self.first_name = (me_dict.get("first_name") or "").strip() or None
+                self.last_name = (me_dict.get("last_name") or "").strip() or None
+
+    def clear(self) -> None:
+        with self._lock:
+            self.user_id = None
+            self.username = None
+            self.first_name = None
+            self.last_name = None
+            self.channel_ids = set()
+
+    def set_channels(self, ids: set[int]) -> None:
+        with self._lock:
+            self.channel_ids = set(ids)
+
+    def set_client(self, client: Client | None) -> None:
+        self.client = client
+
+    def get_client(self) -> Client | None:
+        return self.client
+
+
+state = AppState()
 
 
 def get_project_root() -> str:
@@ -171,7 +217,7 @@ def _migrate_app_config_from_legacy():
 
 # ---------- API config (api_config.json) ----------
 
-def load_api_config():
+def load_api_config() -> dict:
     global _api_config_cache
     _migrate_to_api_config()
     path = _api_config_path()
@@ -188,7 +234,7 @@ def load_api_config():
     return data
 
 
-def save_api_config(data):
+def save_api_config(data: dict) -> None:
     global _api_config_cache
     path = _api_config_path()
     try:
@@ -199,72 +245,80 @@ def save_api_config(data):
         log.warning("save_api_config failed: %s", e)
 
 
-def get_api_config():
+def get_api_config() -> dict:
     global _api_config_cache
     if _api_config_cache is None:
         load_api_config()
     return dict(_api_config_cache)
 
 
-def reset_api_config():
+def get_api_config_readonly() -> MappingProxyType:
+    """Read-only view, no copy overhead."""
+    global _api_config_cache
+    if _api_config_cache is None:
+        load_api_config()
+    return MappingProxyType(_api_config_cache)
+
+
+def reset_api_config() -> None:
     save_api_config(dict(_API_DEFAULTS))
 
 
-def get_api_id():
-    return _int(get_api_config().get("api_id"))
+def get_api_id() -> int | None:
+    return _int(get_api_config_readonly().get("api_id"))
 
 
-def get_api_hash():
-    return (get_api_config().get("api_hash") or "").strip()
+def get_api_hash() -> str:
+    return (get_api_config_readonly().get("api_hash") or "").strip()
 
 
-def get_scan_limit():
-    return _int(get_api_config().get("scan_limit"))
+def get_scan_limit() -> int | None:
+    return _int(get_api_config_readonly().get("scan_limit"))
 
 
-def get_delay_sec():
-    return _float(get_api_config().get("delay_sec"), 0.2)
+def get_delay_sec() -> float:
+    return _float(get_api_config_readonly().get("delay_sec"), 0.2)
 
 
-def get_scan_delay_between_chats():
-    return _float(get_api_config().get("scan_delay_between_chats"), 2.0)
+def get_scan_delay_between_chats() -> float:
+    return _float(get_api_config_readonly().get("scan_delay_between_chats"), 2.0)
 
 
-def get_chat_id_cli():
-    return _int(get_api_config().get("chat_id_cli"))
+def get_chat_id_cli() -> int | None:
+    return _int(get_api_config_readonly().get("chat_id_cli"))
 
 
-def get_scan_include_groups():
-    v = get_api_config().get("scan_include_groups")
+def get_scan_include_groups() -> bool:
+    v = get_api_config_readonly().get("scan_include_groups")
     return v if isinstance(v, bool) else True
 
 
-def get_scan_include_channels():
-    v = get_api_config().get("scan_include_channels")
+def get_scan_include_channels() -> bool:
+    v = get_api_config_readonly().get("scan_include_channels")
     return v if isinstance(v, bool) else True
 
 
-def get_scan_include_private():
-    v = get_api_config().get("scan_include_private")
+def get_scan_include_private() -> bool:
+    v = get_api_config_readonly().get("scan_include_private")
     return v if isinstance(v, bool) else True
 
 
-def get_export_parallel_chats():
-    return max(1, min(6, _int(get_api_config().get("export_parallel_chats"), 2)))
+def get_export_parallel_chats() -> int:
+    return max(1, min(6, _int(get_api_config_readonly().get("export_parallel_chats"), 2)))
 
 
-def get_export_include_media():
-    v = get_api_config().get("export_include_media")
+def get_export_include_media() -> bool:
+    v = get_api_config_readonly().get("export_include_media")
     return v if isinstance(v, bool) else True
 
 
-def get_export_message_limit():
-    return _int(get_api_config().get("export_message_limit"))
+def get_export_message_limit() -> int | None:
+    return _int(get_api_config_readonly().get("export_message_limit"))
 
 
 # ---------- App config (config.json): session_name, accounts, current_session ----------
 
-def load_config():
+def load_config() -> dict:
     global _app_config_cache
     _migrate_app_config_from_legacy()
     path = _app_config_path()
@@ -281,7 +335,7 @@ def load_config():
     return data
 
 
-def save_config(data):
+def save_config(data: dict) -> None:
     global _app_config_cache
     path = _app_config_path()
     try:
@@ -292,44 +346,35 @@ def save_config(data):
         log.warning("save_config failed: %s", e)
 
 
-def get_config():
+def get_config() -> dict:
     global _app_config_cache
     if _app_config_cache is None:
         load_config()
     return dict(_app_config_cache)
 
 
-def get_config_value(key):
+def get_config_value(key: str):
     return get_config().get(key, _APP_DEFAULTS.get(key))
 
 
-def set_config_value(key, value):
+def set_config_value(key: str, value) -> None:
     c = get_config()
     c[key] = value
     save_config(c)
 
 
-def reset_config():
+def reset_config() -> None:
     save_config(dict(_APP_DEFAULTS))
 
-_current_app = None
-my_user_id = None
-my_username = None
-my_first_name = None
-my_last_name = None
-my_channel_ids: set = set()
-
-
-def set_my_channels(channel_ids: set):
+def set_my_channels(channel_ids: set[int]) -> None:
     """Сохранить ID каналов, где пользователь является admin/creator."""
-    global my_channel_ids
-    my_channel_ids = set(channel_ids)
-    log.debug("set_my_channels: %d каналов", len(my_channel_ids))
+    state.set_channels(channel_ids)
+    log.debug("set_my_channels: %d каналов", len(channel_ids))
 
 
-async def fetch_and_set_my_channels(client):
+async def fetch_and_set_my_channels(client: Client) -> None:
     """Обходит диалоги один раз и собирает ID каналов где пользователь — admin или creator."""
-    ids = set()
+    ids: set[int] = set()
     try:
         async for dialog in client.get_dialogs():
             chat = dialog.chat
@@ -345,7 +390,7 @@ def _accounts_profiles_path():
     return os.path.join(get_project_root(), "accounts_profiles.json")
 
 
-def get_account_profile(session_name):
+def get_account_profile(session_name: str) -> dict:
     """Профиль для отображения: {"display_name": str, "username": str|None, "avatar_path": str|None}. Пустой dict если нет данных."""
     path = _accounts_profiles_path()
     if not os.path.isfile(path):
@@ -360,7 +405,7 @@ def get_account_profile(session_name):
         return {}
 
 
-def save_account_profile(session_name, profile):
+def save_account_profile(session_name: str, profile: dict) -> None:
     """Сохранить профиль для сессии. profile: dict с ключами display_name, username, avatar_path."""
     path = _accounts_profiles_path()
     data = {}
@@ -385,7 +430,7 @@ def save_account_profile(session_name, profile):
         log.warning("save_account_profile failed: %s", e)
 
 
-def get_accounts_list():
+def get_accounts_list() -> list[str]:
     """Список имён сессий из config.json. Может быть пустым."""
     acc = get_config_value("accounts")
     if isinstance(acc, list):
@@ -393,12 +438,12 @@ def get_accounts_list():
     return []
 
 
-def save_accounts_list(accounts):
+def save_accounts_list(accounts: list[str]) -> None:
     """Сохранить список аккаунтов в config."""
     set_config_value("accounts", list(accounts))
 
 
-def add_account(session_name):
+def add_account(session_name: str) -> bool:
     """Добавить аккаунт (сессию) в список. Не дублирует."""
     name = (session_name or "").strip()
     if not name:
@@ -411,7 +456,7 @@ def add_account(session_name):
     return True
 
 
-def remove_account(session_name):
+def remove_account(session_name: str) -> bool:
     """Удалить аккаунт из списка. Файл сессии не удаляется."""
     name = (session_name or "").strip()
     if not name:
@@ -424,26 +469,26 @@ def remove_account(session_name):
     return True
 
 
-def get_current_session():
+def get_current_session() -> str | None:
     """Текущая выбранная сессия или первая из списка. None если аккаунтов нет."""
     name = get_config_value("current_session")
     accounts = get_accounts_list()
-    if name and (name or "").strip() and (name or "").strip() in accounts:
-        return (name or "").strip()
+    if name and name.strip() in accounts:
+        return name.strip()
     return accounts[0] if accounts else None
 
 
-def get_cache_session_key():
+def get_cache_session_key() -> str:
     """Ключ сессии для имени файла кэша: текущая сессия или имя по умолчанию, если аккаунтов нет."""
     return get_current_session() or (get_config_value("session_name") or "session").strip()
 
 
-def set_current_session(session_name):
+def set_current_session(session_name: str) -> None:
     """Сохранить выбранную сессию в config."""
     set_config_value("current_session", session_name)
 
 
-def create_client(session_name):
+def create_client(session_name: str) -> Client:
     """Создать Pyrogram Client для указанной сессии."""
     api_id = get_api_id()
     api_hash = get_api_hash()
@@ -452,36 +497,25 @@ def create_client(session_name):
     return Client(session_name, api_id=api_id, api_hash=api_hash, workdir=get_project_root(), no_updates=True)
 
 
-def set_app(client):
+def set_app(client: Client | None) -> None:
     """Установить текущий клиент (вызывает воркер после подключения)."""
-    global _current_app
-    _current_app = client
+    state.set_client(client)
 
 
-def get_app():
+def get_app() -> Client | None:
     """Текущий активный клиент (None до подключения воркера)."""
-    return _current_app
+    return state.get_client()
 
 
-def clear_me():
+def clear_me() -> None:
     """Сбросить данные текущего пользователя перед переключением аккаунта."""
-    global my_user_id, my_username, my_first_name, my_last_name, my_channel_ids
-    my_user_id = None
-    my_username = None
-    my_first_name = None
-    my_last_name = None
-    my_channel_ids = set()
+    state.clear()
 
 
-def set_me_from_dict(me_dict):
-    """Обновить my_user_id / my_username / имя из результата get_me (для check_if_mine)."""
-    global my_user_id, my_username, my_first_name, my_last_name
-    if me_dict:
-        my_user_id = me_dict.get("id")
-        my_username = (me_dict.get("username") or "").strip() or None
-        my_first_name = (me_dict.get("first_name") or "").strip() or None
-        my_last_name = (me_dict.get("last_name") or "").strip() or None
-    log.debug("set_me_from_dict: my_user_id=%s my_username=%s", my_user_id, my_username)
+def set_me_from_dict(me_dict: dict | None) -> None:
+    """Обновить данные текущего пользователя из результата get_me (для check_if_mine)."""
+    state.set_me(me_dict)
+    log.debug("set_me_from_dict: user_id=%s username=%s", state.user_id, state.username)
 
 
 @dataclass
@@ -599,39 +633,36 @@ def _is_channel_chat_type(chat) -> bool:
     return t == ChatType.CHANNEL or key == "channel" or key.endswith(".channel")
 
 
-async def check_if_mine(message):
+async def check_if_mine(message) -> bool:
     try:
-        # Исходящее (я отправил) — в каналах from_user часто пустой, полагаемся на out/outgoing
         if getattr(message, "out", None) is True or getattr(message, "outgoing", None) is True:
             return True
-        # Сообщение отправлено от имени канала, которым владеет/управляет пользователь
         sender_chat = getattr(message, "sender_chat", None)
-        if sender_chat and my_channel_ids and getattr(sender_chat, "id", None) in my_channel_ids:
+        if sender_chat and state.channel_ids and getattr(sender_chat, "id", None) in state.channel_ids:
             return True
         if message.from_user:
             uid = message.from_user.id
             uname = (getattr(message.from_user, "username") or "").strip()
-            if my_user_id is not None and uid == my_user_id:
+            if state.user_id is not None and uid == state.user_id:
                 return True
-            if my_username and uname and uname.lower() == my_username.lower():
+            if state.username and uname and uname.lower() == state.username.lower():
                 return True
-        # Подписи админов/авторов в канале (когда from_user может быть пустым)
         sig = getattr(message, "author_signature", None)
         if sig:
             sig_l = str(sig).lower()
             sig_words = re.findall(r"\w+", sig_l)
-            if my_username and my_username.lower() in sig_words:
+            if state.username and state.username.lower() in sig_words:
                 return True
-            if my_first_name and my_first_name.lower() in sig_words:
+            if state.first_name and state.first_name.lower() in sig_words:
                 return True
-            if my_last_name and my_last_name.lower() in sig_words:
+            if state.last_name and state.last_name.lower() in sig_words:
                 return True
         return False
     except (UnicodeDecodeError, UnicodeEncodeError, TypeError, ValueError, AttributeError):
         return False
 
 
-def make_preview(message, max_len=50):
+def make_preview(message, max_len: int = 50) -> str:
     """Текст или подпись, обрезка по длине. Безопасно при ошибках кодировки."""
     try:
         raw = getattr(message, "text", None) or getattr(message, "caption", None)
@@ -656,29 +687,30 @@ def _message_date_str(message) -> str:
     return d.strftime("%Y-%m-%d %H:%M")
 
 
-async def delete_message_ids(cid, message_ids, pause_event=None, stop_event=None, progress_callback=None):
+async def delete_message_ids(cid: int, message_ids, pause_event=None, stop_event=None, progress_callback=None) -> list[int]:
     """
-    Удаляет сообщения в чате cid по списку ID с паузами и повторной попыткой при FloodWait.
+    Удаляет сообщения в чате cid по списку ID батчами (до 100 за вызов).
     Возвращает список успешно удалённых message_id.
     """
     if not message_ids:
         return []
     log.debug("delete_message_ids: chat_id=%s count=%s", cid, len(message_ids))
-    deleted_ids = []
     client = get_app()
     if not client:
         return []
+    deleted_ids: list[int] = []
     total = len(message_ids)
-    for mid in message_ids:
+    BATCH_SIZE = 100
+
+    for batch_start in range(0, total, BATCH_SIZE):
         if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
-            log.debug("delete_message_ids stopped: chat_id=%s deleted=%s", cid, len(deleted_ids))
             break
+        batch = message_ids[batch_start:batch_start + BATCH_SIZE]
+        batch_int = [int(mid) for mid in batch]
         while True:
             try:
-                mid_int = int(mid)
-                await client.delete_messages(cid, mid_int)
-                log.debug("Удалён пост: chat_id=%s message_id=%s", cid, mid_int)
-                deleted_ids.append(mid_int)
+                await client.delete_messages(cid, batch_int)
+                deleted_ids.extend(batch_int)
                 if progress_callback:
                     try:
                         progress_callback(len(deleted_ids), total, cid)
@@ -688,17 +720,32 @@ async def delete_message_ids(cid, message_ids, pause_event=None, stop_event=None
                     break
                 break
             except FloodWait as e:
-                log.warning("FloodWait: ждём %s сек", e.value)
+                log.warning("FloodWait: waiting %s sec", e.value)
                 if not await _sleep_responsive(e.value, pause_event, stop_event):
                     break
-            except Exception as e:
-                log.exception("Ошибка удаления message_id=%s: %s", mid, e)
+            except Exception:
+                for mid in batch_int:
+                    if _is_stopped(stop_event):
+                        break
+                    try:
+                        await client.delete_messages(cid, mid)
+                        deleted_ids.append(mid)
+                    except FloodWait as e2:
+                        await _sleep_responsive(e2.value, pause_event, stop_event)
+                    except Exception:
+                        pass
+                    if progress_callback:
+                        try:
+                            progress_callback(len(deleted_ids), total, cid)
+                        except Exception:
+                            pass
                 break
+
     log.debug("delete_message_ids done: chat_id=%s deleted=%s", cid, len(deleted_ids))
     return deleted_ids
 
 
-async def scan_chat(cid, pause_event=None, stop_event=None):
+async def scan_chat(cid: int, pause_event=None, stop_event=None) -> list[tuple[int, str, str]]:
     """
     Сканирует один чат и возвращает список своих сообщений: [(message_id, preview, date_str), ...].
     """
@@ -730,15 +777,15 @@ async def scan_chat(cid, pause_event=None, stop_event=None):
 
 
 async def scan_all_dialogs(
-    include_groups=True,
-    include_channels=True,
-    include_private=True,
+    include_groups: bool = True,
+    include_channels: bool = True,
+    include_private: bool = True,
     pause_event=None,
     stop_event=None,
     progress_callback=None,
     dialog_progress_callback=None,
-    max_my_messages_per_chat=None,
-):
+    max_my_messages_per_chat: int | None = None,
+) -> list[Place]:
     """
     Обходит все диалоги, в каждом ищет свои сообщения.
     progress_callback(place) — при нахождении места с сообщениями.
@@ -831,14 +878,14 @@ async def scan_all_dialogs(
 
 
 async def list_export_dialogs(
-    include_groups=True,
-    include_channels=True,
-    include_private=True,
+    include_groups: bool = True,
+    include_channels: bool = True,
+    include_private: bool = True,
     pause_event=None,
     stop_event=None,
     progress_callback=None,
     dialog_progress_callback=None,
-):
+) -> list[Place]:
     """Быстро получить список диалогов для экспортера без обхода истории сообщений."""
     places = []
     n = 0
@@ -873,7 +920,7 @@ async def list_export_dialogs(
     return places
 
 
-async def delete_all_my_in_chat_no_scan(cid, progress_callback=None, pause_event=None, stop_event=None):
+async def delete_all_my_in_chat_no_scan(cid: int, progress_callback=None, pause_event=None, stop_event=None) -> int:
     """
     Обходит историю чата cid и удаляет каждое своё сообщение по ходу (без предварительного списка).
     progress_callback(count) — вызывается каждые 10 удалённых сообщений.
@@ -1089,7 +1136,7 @@ async def _download_message_media(client, message, media_dir, pause_event=None, 
             return None
 
 
-async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_event=None, progress_callback=None):
+async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_event=None, progress_callback=None) -> tuple[str, dict]:
     """
     Потоковый параллельный экспорт выбранных чатов.
 

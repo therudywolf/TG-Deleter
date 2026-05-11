@@ -22,6 +22,7 @@ from ui.theme import (
     font,
 )
 from ui.queues import scan_paused, scan_stop_requested
+from ui.chat_card import ChatCard
 
 VISIBLE_LIMIT = 500
 
@@ -38,6 +39,7 @@ class ExportFrame(ctk.CTkFrame):
         self._loading = False
         self._paused = False
         self._selected_card = None
+        self._search_job = None
         self._export_total_chats = 0
         self._export_done_chats = 0
         self._export_total_messages = None
@@ -180,7 +182,7 @@ class ExportFrame(ctk.CTkFrame):
         self.section_combo.pack(side="left", padx=(0, PAD))
         ctk.CTkLabel(tools, text="Поиск:").pack(side="left", padx=(0, PAD_SM))
         self.search_var = ctk.StringVar()
-        self.search_var.trace_add("write", lambda *_a: self._apply_filter())
+        self.search_var.trace_add("write", lambda *_a: self._schedule_filter())
         ctk.CTkEntry(tools, placeholder_text="Название чата...", width=260, textvariable=self.search_var).pack(side="left")
 
         self.progress = ctk.CTkProgressBar(self, mode="indeterminate", height=4)
@@ -204,6 +206,11 @@ class ExportFrame(ctk.CTkFrame):
         self.scroll = ctk.CTkScrollableFrame(self, fg_color=SCROLL_FRAME_BG, corner_radius=0)
         self.scroll.pack(fill="both", expand=True)
         self._update_counters()
+
+    def _schedule_filter(self):
+        if self._search_job is not None:
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(300, self._apply_filter)
 
     def _load_dialogs(self):
         scan_paused.clear()
@@ -345,11 +352,10 @@ class ExportFrame(ctk.CTkFrame):
 
     def append_dialogs(self, dialogs):
         self.dialogs.extend(dialogs)
-        if any(not getattr(w, "place_data", None) for w in self.scroll.winfo_children()):
-            for widget in self.scroll.winfo_children():
-                if not getattr(widget, "place_data", None):
-                    widget.destroy()
-        rendered_count = len([w for w in self.scroll.winfo_children() if getattr(w, "place_data", None)])
+        for widget in self.scroll.winfo_children():
+            if not isinstance(widget, ChatCard):
+                widget.destroy()
+        rendered_count = len([w for w in self.scroll.winfo_children() if isinstance(w, ChatCard)])
         for place in dialogs:
             if self._matches(place):
                 if rendered_count < VISIBLE_LIMIT:
@@ -394,49 +400,30 @@ class ExportFrame(ctk.CTkFrame):
         self._update_counters(visible=len(items))
 
     def _build_card(self, place: Place):
-        card = ctk.CTkFrame(self.scroll, corner_radius=0, fg_color=CARD_BG, cursor="hand2", height=38)
-        card.pack(fill="x", pady=(0, 1), padx=0)
-        card.pack_propagate(False)
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="both", expand=True, padx=PAD_SM)
-        var = ctk.BooleanVar(value=place.chat_id in self.selected_ids)
-        cb = ctk.CTkCheckBox(
-            row,
-            text="",
-            variable=var,
-            width=24,
-            height=24,
-            command=lambda cid=place.chat_id, v=var: self._on_check(cid, v.get()),
+        card = ChatCard(
+            self.scroll, place,
+            selected=place.chat_id in self.selected_ids,
+            compact=True,
+            on_check=self._on_check,
+            on_click=self._on_card_click,
         )
-        cb.pack(side="left", padx=(0, PAD_SM))
-        title_short = (place.title[:72] + "…") if len(place.title) > 72 else place.title
-        ctk.CTkLabel(row, text=title_short, anchor="w", font=font(13)).pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(row, text=place.type_str, width=130, anchor="w", font=font(12), text_color=TEXT_MUTED).pack(side="right")
-        card.place_data = place
-        card.place_var = var
-        card.bind("<Button-1>", self._select_card)
-        row.bind("<Button-1>", self._select_card)
+        card.pack(fill="x", pady=(0, 1), padx=0)
         return card
 
-    def _select_card(self, event):
-        widget = event.widget
-        while widget and not getattr(widget, "place_data", None):
-            widget = widget.master if hasattr(widget, "master") else None
-        if widget is None:
-            return
+    def _on_card_click(self, card: ChatCard):
         if self._selected_card is not None and self._selected_card.winfo_exists():
             self._selected_card.configure(fg_color=CARD_BG)
-        widget.configure(fg_color=ROW_HOVER)
-        self._selected_card = widget
+        card.configure(fg_color=ROW_HOVER)
+        self._selected_card = card
 
     def _set_visible_checks(self, value: bool):
         for card in self.scroll.winfo_children():
-            if getattr(card, "place_var", None) and getattr(card, "place_data", None):
-                card.place_var.set(value)
+            if isinstance(card, ChatCard):
+                card.set_checked(value)
                 if value:
-                    self.selected_ids.add(card.place_data.chat_id)
+                    self.selected_ids.add(card.place.chat_id)
                 else:
-                    self.selected_ids.discard(card.place_data.chat_id)
+                    self.selected_ids.discard(card.place.chat_id)
         self._update_counters()
 
     def _selected_chat_ids(self):

@@ -172,11 +172,21 @@ class LoginDialog(ctk.CTkToplevel):
         if not name:
             self._set_status("Введите имя сессии.", error=True)
             return
+        if len(name) < 2:
+            self._set_status("Имя сессии: минимум 2 символа.", error=True)
+            return
         if not all(c in _SESSION_CHARS for c in name):
             self._set_status("Имя сессии: только буквы, цифры, _ и -.", error=True)
             return
         if not phone or not phone.startswith("+"):
             self._set_status("Введите номер с кодом страны, например +79001234567.", error=True)
+            return
+        digits = phone[1:]
+        if not digits.isdigit():
+            self._set_status("Номер должен содержать только цифры после +.", error=True)
+            return
+        if len(digits) < 7 or len(digits) > 15:
+            self._set_status("Номер телефона: от 7 до 15 цифр.", error=True)
             return
         self._session_name = name
         self._phone = phone
@@ -241,7 +251,11 @@ class LoginDialog(ctk.CTkToplevel):
     async def _async_sign_in(self, code: str):
         try:
             await self._client.sign_in(self._phone, self._phone_code_hash, code)
-            await self._client.disconnect()
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
             self._q.put(("success", self._session_name))
         except SessionPasswordNeeded:
             self._q.put(("need_2fa", None))
@@ -258,7 +272,11 @@ class LoginDialog(ctk.CTkToplevel):
     async def _async_check_password(self, password: str):
         try:
             await self._client.check_password(password)
-            await self._client.disconnect()
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
             self._q.put(("success", self._session_name))
         except BadRequest:
             self._q.put(("error", "Неверный облачный пароль."))

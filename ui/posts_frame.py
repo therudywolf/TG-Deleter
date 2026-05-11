@@ -71,60 +71,52 @@ class PostsFrame(ctk.CTkFrame):
         actions_inner = ctk.CTkFrame(actions_block, fg_color="transparent")
         actions_inner.pack(fill="x", padx=PAD, pady=PAD_SM)
         ctk.CTkLabel(actions_inner, text="Действия с сообщениями", font=font(12, "bold"), text_color="gray").pack(anchor="w")
-        actions = ctk.CTkFrame(actions_inner, fg_color="transparent")
-        actions.pack(fill="x", pady=(PAD_SM, 0))
 
-        # Удалить выбранные
-        col1 = ctk.CTkFrame(actions, fg_color="transparent")
-        col1.pack(side="left", padx=PAD_SM)
-        ctk.CTkButton(
-            col1, text="Удалить выбранные", command=self._delete_selected,
-            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER, width=160
-        ).pack()
-        ctk.CTkLabel(col1, text="Только отмеченные в этом чате", font=font(11), text_color="gray").pack()
+        actions_grid = ctk.CTkFrame(actions_inner, fg_color="transparent")
+        actions_grid.pack(fill="x", pady=(PAD_SM, 0))
 
-        # Удалить все здесь
-        col2 = ctk.CTkFrame(actions, fg_color="transparent")
-        col2.pack(side="left", padx=PAD_SM)
-        ctk.CTkButton(
-            col2, text="Удалить всё здесь", command=self._delete_all_here,
-            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER, width=160
-        ).pack()
-        ctk.CTkLabel(col2, text="Все ваши сообщения в этом чате", font=font(11), text_color="gray").pack()
+        btn_delete_selected = ctk.CTkButton(
+            actions_grid, text="Удалить выбранные", command=self._delete_selected,
+            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER,
+        )
+        btn_delete_selected.grid(row=0, column=0, padx=PAD_SM, pady=4, sticky="ew")
+        bind_tooltip(btn_delete_selected, "Только отмеченные в этом чате")
 
-        # Удалить везде кроме этого
-        col3 = ctk.CTkFrame(actions, fg_color="transparent")
-        col3.pack(side="left", padx=PAD_SM)
+        btn_delete_all = ctk.CTkButton(
+            actions_grid, text="Удалить всё здесь", command=self._delete_all_here,
+            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER,
+        )
+        btn_delete_all.grid(row=0, column=1, padx=PAD_SM, pady=4, sticky="ew")
+        bind_tooltip(btn_delete_all, "Все ваши сообщения в этом чате")
+
         btn_except = ctk.CTkButton(
-            col3, text="Удалить везде кроме этого", command=self._delete_all_except,
-            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER, width=200
+            actions_grid, text="Удалить кроме этого", command=self._delete_all_except,
+            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER,
         )
-        btn_except.pack()
+        btn_except.grid(row=0, column=2, padx=PAD_SM, pady=4, sticky="ew")
         bind_tooltip(btn_except, "Удалит все ваши сообщения во всех остальных чатах. В текущем чате ничего не будет удалено.")
-        ctk.CTkLabel(col3, text="Удалить ваши сообщения во всех остальных чатах, здесь оставить", font=font(11), text_color="gray").pack()
 
-        # Удалить все мои здесь без скана
-        col4 = ctk.CTkFrame(actions, fg_color="transparent")
-        col4.pack(side="left", padx=PAD_SM)
         btn_no_scan = ctk.CTkButton(
-            col4, text="Удалить все мои здесь (без скана)", command=self._delete_all_no_scan,
-            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER, width=220
+            actions_grid, text="Без скана", command=self._delete_all_no_scan,
+            corner_radius=BTN_RADIUS, fg_color=DANGER, hover_color=DANGER_HOVER,
         )
-        btn_no_scan.pack()
+        btn_no_scan.grid(row=1, column=0, padx=PAD_SM, pady=4, sticky="ew")
         bind_tooltip(btn_no_scan, "Обходит историю чата и удаляет каждое ваше сообщение по ходу. Список сообщений не строится — подходит для очень длинных историй.")
-        ctk.CTkLabel(col4, text="Обход истории и удаление по ходу, без предварительного списка", font=font(11), text_color="gray").pack()
 
-        # Экспорт сообщений этого чата
-        col5 = ctk.CTkFrame(actions, fg_color="transparent")
-        col5.pack(side="left", padx=PAD_SM)
-        ctk.CTkButton(
-            col5, text="Экспорт CSV", command=self._export_messages_csv,
-            corner_radius=BTN_RADIUS, width=120, fg_color=BTN_SECONDARY_DANGER
-        ).pack()
-        ctk.CTkButton(
-            col5, text="Экспорт JSON", command=self._export_messages_json,
-            corner_radius=BTN_RADIUS, width=120, fg_color=BTN_SECONDARY_DANGER
-        ).pack()
+        btn_csv = ctk.CTkButton(
+            actions_grid, text="CSV", command=self._export_messages_csv,
+            corner_radius=BTN_RADIUS, fg_color=BTN_SECONDARY_DANGER,
+        )
+        btn_csv.grid(row=1, column=1, padx=PAD_SM, pady=4, sticky="ew")
+
+        btn_json = ctk.CTkButton(
+            actions_grid, text="JSON", command=self._export_messages_json,
+            corner_radius=BTN_RADIUS, fg_color=BTN_SECONDARY_DANGER,
+        )
+        btn_json.grid(row=1, column=2, padx=PAD_SM, pady=4, sticky="ew")
+
+        for c in range(3):
+            actions_grid.columnconfigure(c, weight=1)
 
     def set_place(self, place: Optional[Place]):
         self.current_place = place
@@ -241,7 +233,13 @@ class PostsFrame(ctk.CTkFrame):
             messagebox.showinfo("Удаление", "Нет других чатов с вашими сообщениями.")
             return
         total = sum(len(p.messages) for p in others)
-        if not messagebox.askyesno("Подтверждение", f"Удалить все ваши сообщения ({total}) в остальных чатах ({len(others)})? В текущем чате ничего не будет удалено. Продолжить?"):
+        chat_list = "\n".join(f"  \u2022 {p.title} ({len(p.messages)} \u0441\u043e\u043e\u0431\u0449.)" for p in others[:15])
+        if len(others) > 15:
+            chat_list += f"\n  ... \u0438 \u0435\u0449\u0451 {len(others) - 15} \u0447\u0430\u0442\u043e\u0432"
+        if not messagebox.askyesno(
+            "Подтверждение",
+            f"Удалить {total} сообщений в {len(others)} чатах?\n\n{chat_list}\n\nВ текущем чате ничего не удалится. Продолжить?"
+        ):
             return
         scan_paused.clear()
         scan_stop_requested.clear()
@@ -259,7 +257,8 @@ class PostsFrame(ctk.CTkFrame):
     def remove_deleted_ids(self, deleted_ids):
         if not self.current_place:
             return
-        self.current_place.messages = [(m[0], m[1], m[2]) for m in self.current_place.messages if m[0] not in deleted_ids]
+        deleted_set = set(deleted_ids)
+        self.current_place.messages = [(m[0], m[1], m[2]) for m in self.current_place.messages if m[0] not in deleted_set]
         self.set_place(self.current_place)
 
     def _export_messages_csv(self):

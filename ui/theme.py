@@ -5,8 +5,23 @@ import sys
 import customtkinter as ctk
 
 # Тема: тёмная, акцент в стиле Telegram Desktop
-ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
+
+_DEFAULT_APPEARANCE = "dark"
+
+
+def set_theme(mode: str = "dark"):
+    """Set appearance mode: 'dark', 'light', or 'system'."""
+    valid = {"dark", "light", "system"}
+    mode = mode.lower() if mode.lower() in valid else _DEFAULT_APPEARANCE
+    ctk.set_appearance_mode(mode)
+
+
+def get_current_theme() -> str:
+    return ctk.get_appearance_mode().lower()
+
+
+set_theme(_DEFAULT_APPEARANCE)
 
 FONT_FAMILY = "Segoe UI Variable" if sys.platform == "win32" else None
 

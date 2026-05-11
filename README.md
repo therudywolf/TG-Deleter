@@ -1,50 +1,64 @@
 # TG Deleter
 
-Desktop utility for Telegram accounts. It scans dialogs for your own messages, lets you delete them selectively, and exports multiple selected chats/channels in parallel.
+Desktop utility for managing your Telegram messages across multiple accounts.
+Scan dialogs for your own messages, delete them selectively or in bulk,
+and export entire chats with media to a local archive.
 
 ## Features
 
-- Multiple Telegram accounts via Pyrogram sessions.
-- Per-account scan cache.
-- Scan filters for groups, channels, and private chats.
-- Responsive pause/stop for long scans and export jobs.
-- Selective deletion by chat/message, including no-scan deletion mode.
-- Parallel streaming export for selected chats:
-  - `messages.jsonl` for machine processing;
-  - `messages.html` for readable local preview;
-  - selectable `media/` attachments by Telegram media type;
-  - `manifest.json` with totals, selected media types, and chat statuses.
-- Export progress for selected chats and processed messages.
+- **Multi-account** — switch between Pyrogram sessions on the fly.
+- **Smart scan** — filters for groups, channels, and private chats with per-account cache.
+- **Selective deletion** — delete by chat, by message, or skip-scan mode; batch API calls (up to 100 per request).
+- **Parallel export** — stream `messages.jsonl` + `messages.html` + selectable media types to disk; large chats never need to fit in memory.
+- **Live progress** — responsive pause / stop for scans, deletes, and exports; FloodWait countdown in the UI.
+- **Theming** — Dark / Light / System appearance via CustomTkinter.
+- **Hotkeys** — `Ctrl+S` scan, `Escape` stop, `F5` refresh cache.
+- **CLI mode** — `python script.py cli` for headless session login.
 
-## Setup
+## Requirements
 
-1. Install Python 3.10+.
-2. Install dependencies:
+- Python 3.10+
+- Telegram API credentials (`api_id` / `api_hash`) from <https://my.telegram.org/apps>
+
+## Quick Start
 
 ```bash
+# 1. Clone the repo
+git clone https://github.com/therudywolf/TG-Deleter.git
+cd TG-Deleter
+
+# 2. Create a virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate   # Linux / macOS
+venv\Scripts\activate      # Windows
+
+# 3. Install dependencies
 pip install -r requirements.txt
-```
 
-3. Copy `api_config.example.json` to `api_config.json` or enter API settings in the app.
-4. Get `api_id` and `api_hash` from https://my.telegram.org/apps.
-5. Start the GUI:
+# 4. Copy the config template and fill in your API credentials
+cp api_config.example.json api_config.json
 
-```bash
+# 5. Launch the GUI
 python script.py
 ```
 
-On Windows, `run.bat` creates/uses `venv` and starts the GUI.
+On Windows you can also run `run.bat` — it creates/uses `venv` automatically.
+
+### CLI Login
+
+```bash
+python script.py login --session my_account --phone +71234567890
+```
 
 ## Export
 
-1. Open `Экспорт` in the left sidebar.
-2. Click `Загрузить список` to fetch all available dialogs without scanning message history.
-3. Select which media types should be downloaded: photos, videos, files, audio/voice, stickers/GIFs, or other attachments.
-4. Filter/search the list and mark one or more chats with checkboxes.
-5. Click `Запустить бекап выбранных`.
-6. Pick an output folder.
+1. Open **Экспорт** in the left sidebar.
+2. Click **Загрузить список** to fetch all available dialogs (no history scan needed).
+3. Select media types to download: photos, videos, files, audio/voice, stickers/GIFs, or other attachments.
+4. Filter / search the list and check one or more chats.
+5. Click **Запустить бекап выбранных** and choose an output folder.
 
-The app creates a timestamped `TG_Deleter_export_*` folder. Export is intentionally streamed to disk so large chats do not have to fit in memory.
+A timestamped `TG_Deleter_export_*` folder is created with `messages.jsonl`, `messages.html`, optional `media/`, and `manifest.json` per chat.
 
 ## Build
 
@@ -54,17 +68,25 @@ Windows executable:
 .\build.ps1
 ```
 
-The build writes `TGDeleter.exe` locally. Build artifacts, sessions, configs, caches, profiles, and exports are ignored by Git.
+Produces `TGDeleter.exe` in the project root. Build artifacts, sessions, configs, caches, and exports are covered by `.gitignore`.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
 ## Privacy
 
-Do not commit local files containing account data:
+The following local files contain account data and **must not** be committed:
 
-- `api_config.json`
-- `config.json`
-- `accounts_profiles.json`
-- `*.session`
-- `scan_cache_*.json`
-- export folders
+- `api_config.json`, `config.json`, `accounts_profiles.json`
+- `*.session`, `scan_cache_*.json`
+- export folders (`TG_Deleter_export_*`, `exports/`)
 
-These patterns are covered by `.gitignore`.
+All patterns are covered by `.gitignore`.
+
+## License
+
+[MIT](LICENSE)

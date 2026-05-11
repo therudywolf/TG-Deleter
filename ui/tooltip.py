@@ -19,18 +19,31 @@ def bind_tooltip(widget, text: str, delay_ms: int = 500):
         tw[0].withdraw()
         tw[0].overrideredirect(True)
         tw[0].attributes("-topmost", True)
-        lbl = ctk.CTkLabel(tw[0], text=text, font=ctk.CTkFont(size=12), fg_color=("gray20", "gray85"), corner_radius=6, padx=8, pady=6, wraplength=280)
+        lbl = ctk.CTkLabel(
+            tw[0], text=text, font=ctk.CTkFont(size=12),
+            fg_color=("gray20", "gray85"), corner_radius=6,
+            padx=8, pady=6, wraplength=280,
+        )
         lbl.pack()
         tw[0].update_idletasks()
         w, h = tw[0].winfo_reqwidth(), tw[0].winfo_reqheight()
         x = root.winfo_pointerx() + 14
         y = root.winfo_pointery() + 14
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        if x + w > screen_w:
+            x = screen_w - w - 10
+        if y + h > screen_h:
+            y = root.winfo_pointery() - h - 10
         tw[0].geometry("+%d+%d" % (x, y))
         tw[0].deiconify()
 
     def hide():
         if job[0] is not None:
-            widget.after_cancel(job[0])
+            try:
+                widget.after_cancel(job[0])
+            except Exception:
+                pass
             job[0] = None
         if tw[0] is not None:
             try:
@@ -40,6 +53,8 @@ def bind_tooltip(widget, text: str, delay_ms: int = 500):
             tw[0] = None
 
     def on_enter(e):
+        if job[0] is not None:
+            widget.after_cancel(job[0])
         job[0] = widget.after(delay_ms, show)
 
     def on_leave(e):

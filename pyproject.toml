@@ -1,0 +1,34 @@
+[project]
+name = "tg-deleter"
+version = "1.1.0"
+description = "Desktop utility for managing and deleting your Telegram messages"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "pyrogram>=2.0.0",
+    "customtkinter>=5.2.0",
+    "python-dotenv>=1.0.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+tg-deleter = "script:main"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

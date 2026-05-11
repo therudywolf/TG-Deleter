@@ -82,6 +82,16 @@ class SettingsFrame(ctk.CTkFrame):
         self.export_limit_var = ctk.StringVar(value=str(api_cfg.get("export_message_limit") or ""))
         ctk.CTkEntry(row7, textvariable=self.export_limit_var, width=100, placeholder_text="пусто").pack(side="left")
 
+        row_theme = ctk.CTkFrame(inner, fg_color="transparent")
+        row_theme.pack(fill="x", pady=(PAD_SM, 0))
+        ctk.CTkLabel(row_theme, text="Тема оформления:", width=220, anchor="w").pack(side="left", padx=(0, PAD_SM))
+        self.theme_var = ctk.StringVar(value=(api_cfg.get("theme", "dark") or "dark").capitalize())
+        ctk.CTkComboBox(
+            row_theme, values=["Dark", "Light", "System"],
+            variable=self.theme_var, width=120,
+            command=self._on_theme_change,
+        ).pack(side="left")
+
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", pady=PAD)
         ctk.CTkButton(btn_row, text="Сохранить", command=self._save, corner_radius=BTN_RADIUS, width=120, height=36, fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(side="left", padx=(0, PAD_SM))
@@ -134,10 +144,19 @@ class SettingsFrame(ctk.CTkFrame):
         c["export_parallel_chats"] = export_parallel
         c["export_include_media"] = self.export_media_var.get()
         c["export_message_limit"] = export_limit
+        c["theme"] = self.theme_var.get().lower()
+        c["export_media_types_filter"] = {
+            "photos": True, "videos": True, "documents": True,
+            "audio": True, "stickers": True, "other": True,
+        }
         save_api_config(c)
         self.status_label.configure(text="Настройки сохранены.")
         if self.on_saved:
             self.on_saved()
+
+    def _on_theme_change(self, value):
+        from ui.theme import set_theme
+        set_theme(value.lower())
 
     def _reset(self):
         if not messagebox.askyesno("Сбросить настройки", "Обнулить настройки API и скана? Потребуется снова ввести API ID и API Hash."):
@@ -151,6 +170,7 @@ class SettingsFrame(ctk.CTkFrame):
         self.export_parallel_var.set("2")
         self.export_media_var.set(True)
         self.export_limit_var.set("")
+        self.theme_var.set("Dark")
         self.status_label.configure(text="Настройки сброшены. Введите API и нажмите «Сохранить».")
 
     def refresh_from_config(self):
@@ -164,6 +184,7 @@ class SettingsFrame(ctk.CTkFrame):
         self.export_parallel_var.set(str(api_cfg.get("export_parallel_chats") or "2"))
         self.export_media_var.set(api_cfg.get("export_include_media", True) is not False)
         self.export_limit_var.set(str(api_cfg.get("export_message_limit") or ""))
+        self.theme_var.set((api_cfg.get("theme", "dark") or "dark").capitalize())
 
     def set_initial_setup(self, is_initial_setup):
         """Переключить заголовок между «Первоначальная настройка» и «Настройки»."""

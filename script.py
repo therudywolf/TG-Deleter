@@ -3,6 +3,7 @@ CLI TG Deleter: один чат из конфига (core.chat_id_cli).
 Запуск: python script.py --cli
 """
 import sys
+import argparse
 import logging
 
 logging.basicConfig(
@@ -14,6 +15,7 @@ logging.basicConfig(
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 from core import (
+    __version__,
     create_client,
     get_current_session,
     set_current_session,
@@ -189,39 +191,63 @@ async def _cli_run(app):
     await main_cli(chat_title=chat_title)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="TG Deleter — удаление своих сообщений в Telegram")
+    parser.add_argument("--version", action="version", version=f"TG Deleter {__version__}")
+    sub = parser.add_subparsers(dest="command")
+
+    cli_parser = sub.add_parser("cli", help="Режим CLI")
+    cli_parser.add_argument("--chat-id", type=int, help="ID чата/канала")
+
+    login_parser = sub.add_parser("login", help="Авторизация сессии")
+    login_parser.add_argument("session", help="Имя сессии")
+
+    args, _ = parser.parse_known_args()
+
+    if args.command is None:
+        if "--login" in sys.argv:
+            args.command = "login"
+            idx = sys.argv.index("--login")
+            args.session = sys.argv[idx + 1].strip() if idx + 1 < len(sys.argv) else None
+        elif "--cli" in sys.argv:
+            args.command = "cli"
+            args.chat_id = None
+            if "--chat-id" in sys.argv:
+                idx = sys.argv.index("--chat-id")
+                if idx + 1 < len(sys.argv):
+                    try:
+                        args.chat_id = int(sys.argv[idx + 1].strip())
+                    except ValueError:
+                        pass
+
+    return args
+
+
 if __name__ == "__main__":
-    if "--login" in sys.argv:
+    args = parse_args()
+
+    if args.command == "login":
         _require_api()
-        idx = sys.argv.index("--login")
-        session = sys.argv[idx + 1].strip() if idx + 1 < len(sys.argv) else None
+        session = getattr(args, "session", None)
         if not session:
-            print("Укажите имя сессии: python script.py --login имя_сессии")
+            print("Укажите имя сессии: python script.py login имя_сессии")
             sys.exit(1)
         add_account(session)
         set_current_session(session)
+        app = create_client(session)
         async def _do_login():
-            app = create_client(session)
             async with app:
                 set_app(app)
                 me = await app.get_me()
                 name = getattr(me, "first_name", "") or ""
                 print(f"\nВход выполнен: {name}. Сессия «{session}» сохранена.")
-        app = create_client(session)
         app.run(_do_login())
-    elif "--cli" in sys.argv:
+    elif args.command == "cli":
         _require_api()
         if not get_current_session():
             print("Сначала добавьте аккаунт в приложении (Настройки / левая панель).")
             sys.exit(1)
-        # Убедиться, что chat_id задан: из аргумента --chat-id или запросить один раз и сохранить
-        chat_id_arg = None
-        if "--chat-id" in sys.argv:
-            idx = sys.argv.index("--chat-id")
-            if idx + 1 < len(sys.argv):
-                try:
-                    chat_id_arg = int(sys.argv[idx + 1].strip())
-                except ValueError:
-                    pass
+        chat_id_arg = getattr(args, "chat_id", None)
         if chat_id_arg is not None:
             cfg = get_api_config()
             cfg["chat_id_cli"] = chat_id_arg
