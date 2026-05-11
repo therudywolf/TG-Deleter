@@ -5,46 +5,63 @@ chcp 65001 >nul 2>nul
 title TG Deleter
 
 where python >nul 2>nul
-if errorlevel 1 (
-    echo [ОШИБКА] Python не найден в PATH.
-    echo Установите Python 3.10+ с https://python.org и отметьте "Add to PATH".
-    pause
-    exit /b 1
-)
+if errorlevel 1 goto :no_python
 
-if not exist "venv\Scripts\activate.bat" (
-    echo [TG Deleter] Создаю виртуальное окружение...
-    python -m venv venv
-    if errorlevel 1 (
-        echo [ОШИБКА] Не удалось создать venv.
-        pause
-        exit /b 1
-    )
-)
+if not exist "venv\Scripts\activate.bat" goto :create_venv
+goto :activate
 
+:create_venv
+echo [TG Deleter] Sozdayu venv...
+python -m venv venv
+if errorlevel 1 goto :venv_fail
+
+:activate
 call venv\Scripts\activate.bat
 
 pip show pyrogram >nul 2>nul
-if errorlevel 1 (
-    echo [TG Deleter] Устанавливаю зависимости...
-    pip install -r requirements.txt
-    if errorlevel 1 (
-        echo [ОШИБКА] Не удалось установить зависимости.
-        pause
-        exit /b 1
-    )
-)
+if errorlevel 1 goto :install_deps
+goto :run
 
-if /i "%~1"=="cli" (
-    echo [TG Deleter] Запуск CLI...
-    python script.py --cli %2 %3 %4 %5
-) else (
-    echo [TG Deleter] Запуск GUI...
-    python script.py
-)
+:install_deps
+echo [TG Deleter] Ustanavlivayu zavisimosti...
+pip install -r requirements.txt
+if errorlevel 1 goto :deps_fail
 
-if errorlevel 1 (
-    echo.
-    echo [TG Deleter] Приложение завершилось с ошибкой (код %errorlevel%).
-    pause
-)
+:run
+if /i "%~1"=="cli" goto :run_cli
+echo [TG Deleter] GUI...
+python script.py
+goto :check_exit
+
+:run_cli
+echo [TG Deleter] CLI...
+python script.py --cli %2 %3 %4 %5
+goto :check_exit
+
+:check_exit
+if errorlevel 1 goto :app_fail
+goto :end
+
+:no_python
+echo [ERROR] Python not found in PATH.
+echo Install Python 3.10+ from https://python.org
+pause
+exit /b 1
+
+:venv_fail
+echo [ERROR] Failed to create venv.
+pause
+exit /b 1
+
+:deps_fail
+echo [ERROR] Failed to install dependencies.
+pause
+exit /b 1
+
+:app_fail
+echo.
+echo [TG Deleter] Exit code: %errorlevel%
+pause
+exit /b 1
+
+:end
