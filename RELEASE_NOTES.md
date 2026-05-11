@@ -18,6 +18,9 @@
 
 - Added a dedicated exporter mode in the sidebar.
 - Exporter now loads all available dialogs without scanning message history for "my messages".
+- Added per-run media type selection for exporter backups: photos, videos, files, audio/voice, stickers/GIFs, and other attachments.
+- Added determinate backup progress with selected chats done/total and processed messages done/total when Telegram exposes history counts.
+- Made multi-chat backup explicit in the exporter UI with `Запустить бекап выбранных`.
 - Moved expensive channel-rights discovery out of account switching; it now runs only before scan/delete operations that need ownership detection.
 - Reduced empty-state artifacts while streaming scan/export lists into the UI.
 - Added persistent export selection, counters, active sidebar sections, and render limits for large dialog lists.

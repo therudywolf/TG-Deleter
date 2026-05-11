@@ -244,11 +244,14 @@ def worker_loop():
                             elif req[0] == "export_chats":
                                 output_dir = req[1]
                                 chat_ids = req[2]
+                                export_options = req[3] if len(req) > 3 and isinstance(req[3], dict) else {}
+                                include_media = export_options.get("include_media", get_export_include_media())
                                 options = ExportOptions(
                                     output_dir=output_dir,
                                     chat_ids=chat_ids,
                                     parallel_chats=get_export_parallel_chats(),
-                                    include_media=get_export_include_media(),
+                                    include_media=include_media,
+                                    media_types=export_options.get("media_types"),
                                     message_limit=get_export_message_limit(),
                                 )
                                 def on_export(kind, payload):
@@ -536,7 +539,7 @@ class App:
             scan_stop_requested,
         ))
 
-    def _on_export_places(self, output_dir, chat_ids):
+    def _on_export_places(self, output_dir, chat_ids, export_options=None):
         if not chat_ids:
             messagebox.showinfo("Экспорт", "Отметьте один или несколько чатов для экспорта.")
             return
@@ -547,11 +550,12 @@ class App:
         scan_stop_requested.clear()
         self._operation_running = True
         self._pending_switch_session = None
+        parallel_chats = get_export_parallel_chats()
         self.places_frame.set_scanning(True, label="Экспортирую")
-        self.export_frame.set_loading(True, label="Экспортирую")
-        self.places_frame.status_label.configure(text=f"Экспорт выбранных чатов: {len(chat_ids)}...")
-        self.export_frame.status_label.configure(text=f"Экспорт выбранных чатов: {len(chat_ids)}...")
-        request_queue.put(("export_chats", output_dir, chat_ids))
+        self.export_frame.start_export_progress(len(chat_ids), parallel_chats)
+        self.places_frame.status_label.configure(text=f"Бекап выбранных чатов: {len(chat_ids)}, параллельно: {parallel_chats}...")
+        self.export_frame.status_label.configure(text=f"Бекап выбранных чатов: {len(chat_ids)}, параллельно: {parallel_chats}...")
+        request_queue.put(("export_chats", output_dir, chat_ids, export_options or {}))
 
     def _open_place(self, place: Place):
         self.places_frame.pack_forget()
@@ -756,13 +760,45 @@ class App:
                     elif msg[0] == "export_progress":
                         kind = msg[1]
                         payload = msg[2] if len(msg) > 2 else {}
-                        if kind == "chat_start":
-                            self.places_frame.status_label.configure(text="Экспорт: %s..." % payload.get("title", payload.get("chat_id", "")))
-                            self.export_frame.status_label.configure(text="Экспорт: %s..." % payload.get("title", payload.get("chat_id", "")))
+                        current_title = payload.get("title")
+                        if kind in ("overall_start", "overall_progress", "chat_start", "chat_progress", "chat_done"):
+                            if kind == "overall_start":
+                                self.export_frame.start_export_progress(payload.get("total_chats", 0), payload.get("parallel_chats"))
+                            self.export_frame.update_export_progress(payload, current_title=current_title)
+                        if kind == "overall_start":
+                            self.places_frame.status_label.configure(
+                                text="Бекап: чаты 0/%s, параллельно: %s..." % (
+                                    payload.get("total_chats", 0),
+                                    payload.get("parallel_chats", get_export_parallel_chats()),
+                                )
+                            )
+                            self.export_frame.status_label.configure(text="Считаю объём истории перед бекапом...")
+                        elif kind == "overall_progress":
+                            if payload.get("total_messages") is not None:
+                                status = "Бекап: чаты %s/%s, сообщения %s/%s" % (
+                                    payload.get("done_chats", 0),
+                                    payload.get("total_chats", 0),
+                                    payload.get("done_messages", 0),
+                                    payload.get("total_messages", 0),
+                                )
+                            else:
+                                status = "Бекап: чаты %s/%s, сообщения %s" % (
+                                    payload.get("done_chats", 0),
+                                    payload.get("total_chats", 0),
+                                    payload.get("done_messages", 0),
+                                )
+                            self.places_frame.status_label.configure(text=status)
+                            self.export_frame.status_label.configure(text=status)
+                        elif kind == "chat_start":
+                            self.places_frame.status_label.configure(text="Бекап: %s..." % payload.get("title", payload.get("chat_id", "")))
+                            self.export_frame.status_label.configure(text="Бекап: %s..." % payload.get("title", payload.get("chat_id", "")))
                         elif kind == "chat_progress":
-                            status = "Экспорт: %s, сообщений: %s, медиа: %s" % (
+                            chat_total = payload.get("chat_total_messages")
+                            messages = payload.get("messages", 0)
+                            msg_part = f"{messages}/{chat_total}" if chat_total is not None else str(messages)
+                            status = "Бекап: %s, сообщений: %s, медиа: %s" % (
                                 payload.get("title", ""),
-                                payload.get("messages", 0),
+                                msg_part,
                                 payload.get("media", 0),
                             )
                             self.places_frame.status_label.configure(text=status)
@@ -776,7 +812,7 @@ class App:
                         stopped = msg[3] if len(msg) > 3 else False
                         self._operation_running = False
                         self.places_frame.set_scanning(False)
-                        self.export_frame.set_loading(False)
+                        self.export_frame.finish_export_progress(stopped)
                         total_messages = manifest.get("total_messages", 0)
                         total_media = manifest.get("total_media", 0)
                         self.places_frame.status_label.configure(text=f"Экспорт готов: {root}")
@@ -794,7 +830,7 @@ class App:
                             self.places_frame.status_label.configure(text="Ошибка сканирования")
                         if op == "export_chats":
                             self.places_frame.set_scanning(False)
-                            self.export_frame.set_loading(False)
+                            self.export_frame.finish_export_progress(stopped=True)
                             self.places_frame.status_label.configure(text="Ошибка экспорта")
                             self.export_frame.status_label.configure(text="Ошибка экспорта")
                         if op == "list_export_dialogs":

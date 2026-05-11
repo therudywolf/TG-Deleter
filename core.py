@@ -493,6 +493,16 @@ class Place:
     messages: list = field(default_factory=list)  # [(message_id, preview, date_str), ...]
 
 
+_EXPORT_MEDIA_TYPE_DEFAULTS = {
+    "photos": True,
+    "videos": True,
+    "documents": True,
+    "audio": True,
+    "stickers": True,
+    "other": True,
+}
+
+
 @dataclass
 class ExportOptions:
     """Параметры потокового экспорта выбранных чатов."""
@@ -500,6 +510,7 @@ class ExportOptions:
     chat_ids: list
     parallel_chats: int = 2
     include_media: bool = True
+    media_types: dict | None = None
     message_limit: int | None = None
     export_format: str = "html_jsonl"
 
@@ -954,7 +965,59 @@ def _message_text(message):
     return ""
 
 
-def _message_record(chat_id, message, media_rel_path=None):
+def _normalize_media_types(media_types):
+    result = dict(_EXPORT_MEDIA_TYPE_DEFAULTS)
+    if isinstance(media_types, dict):
+        for key in result:
+            if key in media_types:
+                result[key] = bool(media_types[key])
+    return result
+
+
+def _message_media_kind(message):
+    if getattr(message, "photo", None):
+        return "photos"
+    if getattr(message, "video", None) or getattr(message, "video_note", None):
+        return "videos"
+    if getattr(message, "document", None):
+        return "documents"
+    if getattr(message, "audio", None) or getattr(message, "voice", None):
+        return "audio"
+    if getattr(message, "sticker", None) or getattr(message, "animation", None):
+        return "stickers"
+    if getattr(message, "media", None):
+        return "other"
+    return None
+
+
+def _should_export_media(message, media_types):
+    media_kind = _message_media_kind(message)
+    if not media_kind:
+        return False
+    return bool(media_types.get(media_kind, True))
+
+
+async def _get_chat_history_count(client, chat_id, limit=None):
+    count = None
+    count_fn = getattr(client, "get_chat_history_count", None)
+    if count_fn:
+        try:
+            count = await count_fn(chat_id)
+            count = int(count) if count is not None else None
+        except Exception as e:
+            log.debug("get_chat_history_count skip for %s: %s", chat_id, e)
+            count = None
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = None
+        if limit is not None:
+            return min(limit, count) if count is not None else limit
+    return count
+
+
+def _message_record(chat_id, message, media_rel_path=None, media_kind=None):
     date = getattr(message, "date", None)
     return {
         "id": getattr(message, "id", None),
@@ -963,6 +1026,7 @@ def _message_record(chat_id, message, media_rel_path=None):
         "sender": _message_sender_name(message),
         "text": _message_text(message),
         "media": media_rel_path,
+        "media_type": media_kind,
         "outgoing": bool(getattr(message, "out", False) or getattr(message, "outgoing", False)),
     }
 
@@ -1050,12 +1114,14 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
     export_root.mkdir(parents=True, exist_ok=False)
 
     parallel = max(1, min(6, int(options.parallel_chats or 1)))
+    media_types = _normalize_media_types(options.media_types)
     semaphore = asyncio.Semaphore(parallel)
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "session": get_cache_session_key(),
         "parallel_chats": parallel,
         "include_media": bool(options.include_media),
+        "media_types": media_types,
         "message_limit": options.message_limit,
         "stopped": False,
         "chats": [],
@@ -1068,6 +1134,49 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
             progress_callback(kind, payload)
         except Exception:
             pass
+
+    emit(
+        "overall_start",
+        total_chats=len(chat_ids),
+        done_chats=0,
+        total_messages=None,
+        done_messages=0,
+        parallel_chats=parallel,
+    )
+
+    count_semaphore = asyncio.Semaphore(parallel)
+
+    async def count_one(chat_id):
+        async with count_semaphore:
+            return chat_id, await _get_chat_history_count(client, chat_id, options.message_limit)
+
+    counts_by_chat = {}
+    for result in await asyncio.gather(*(count_one(cid) for cid in chat_ids), return_exceptions=True):
+        if isinstance(result, Exception):
+            log.debug("export count skipped: %s", result)
+            continue
+        cid, count = result
+        counts_by_chat[cid] = count
+
+    progress_state = {
+        "done_chats": 0,
+        "chat_done": {cid: 0 for cid in chat_ids},
+        "chat_total": dict(counts_by_chat),
+    }
+
+    def overall_payload():
+        totals = [v for v in progress_state["chat_total"].values() if v is not None]
+        total_messages = sum(totals) if totals else None
+        return {
+            "done_chats": progress_state["done_chats"],
+            "total_chats": len(chat_ids),
+            "done_messages": sum(progress_state["chat_done"].values()),
+            "total_messages": total_messages,
+            "total_messages_known": len(totals) == len(chat_ids),
+            "parallel_chats": parallel,
+        }
+
+    emit("overall_progress", **overall_payload())
 
     async def export_one(chat_id):
         async with semaphore:
@@ -1087,6 +1196,7 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
                 "folder": "",
                 "status": "ok",
                 "messages": 0,
+                "total_messages": counts_by_chat.get(chat_id),
                 "media": 0,
             }
             try:
@@ -1103,7 +1213,7 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
                     "type": _chat_type_str(chat),
                     "folder": folder.name,
                 })
-                emit("chat_start", chat_id=chat_id, title=title)
+                emit("chat_start", chat_id=chat_id, title=title, chat_total_messages=stats["total_messages"], **overall_payload())
                 kwargs = {"limit": options.message_limit} if options.message_limit else {}
                 with open(jsonl_path, "w", encoding="utf-8") as jf, open(html_path, "w", encoding="utf-8") as hf:
                     hf.write(_html_header(title))
@@ -1112,21 +1222,41 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
                             stats["status"] = "stopped"
                             break
                         media_rel = None
-                        if options.include_media:
+                        media_kind = _message_media_kind(message)
+                        if options.include_media and _should_export_media(message, media_types):
                             media_path = await _download_message_media(client, message, media_dir, pause_event, stop_event)
                             if media_path:
                                 stats["media"] += 1
                                 media_rel = os.path.relpath(media_path, folder).replace(os.sep, "/")
-                        record = _message_record(chat_id, message, media_rel)
+                        record = _message_record(chat_id, message, media_rel, media_kind)
                         jf.write(json.dumps(record, ensure_ascii=False) + "\n")
                         hf.write(_html_message(record))
                         stats["messages"] += 1
+                        progress_state["chat_done"][chat_id] = stats["messages"]
                         if stats["messages"] % 25 == 0:
                             jf.flush()
                             hf.flush()
-                            emit("chat_progress", chat_id=chat_id, title=title, messages=stats["messages"], media=stats["media"])
+                            emit(
+                                "chat_progress",
+                                chat_id=chat_id,
+                                title=title,
+                                messages=stats["messages"],
+                                chat_total_messages=stats["total_messages"],
+                                media=stats["media"],
+                                **overall_payload(),
+                            )
                     hf.write("</main></body></html>\n")
-                emit("chat_done", chat_id=chat_id, title=title, messages=stats["messages"], media=stats["media"], status=stats["status"])
+                progress_state["chat_done"][chat_id] = stats["messages"]
+                emit(
+                    "chat_done",
+                    chat_id=chat_id,
+                    title=title,
+                    messages=stats["messages"],
+                    chat_total_messages=stats["total_messages"],
+                    media=stats["media"],
+                    status=stats["status"],
+                    **overall_payload(),
+                )
             except FloodWait as e:
                 stats["status"] = "flood_wait"
                 stats["error"] = f"FloodWait {e.value}"
@@ -1143,6 +1273,9 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
     for task in asyncio.as_completed(tasks):
         result = await task
         manifest["chats"].append(result)
+        progress_state["done_chats"] += 1
+        progress_state["chat_done"][result.get("chat_id")] = result.get("messages", 0)
+        emit("overall_progress", **overall_payload())
         if _is_stopped(stop_event):
             manifest["stopped"] = True
 

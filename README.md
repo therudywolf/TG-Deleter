@@ -12,8 +12,9 @@ Desktop utility for Telegram accounts. It scans dialogs for your own messages, l
 - Parallel streaming export for selected chats:
   - `messages.jsonl` for machine processing;
   - `messages.html` for readable local preview;
-  - `media/` attachments when enabled;
-  - `manifest.json` with totals and chat statuses.
+  - selectable `media/` attachments by Telegram media type;
+  - `manifest.json` with totals, selected media types, and chat statuses.
+- Export progress for selected chats and processed messages.
 
 ## Setup
 
@@ -32,15 +33,16 @@ pip install -r requirements.txt
 python script.py
 ```
 
-On Windows, `run_project.bat` creates/uses `venv` and starts the GUI.
+On Windows, `run.bat` creates/uses `venv` and starts the GUI.
 
 ## Export
 
 1. Open `Экспорт` in the left sidebar.
 2. Click `Загрузить список` to fetch all available dialogs without scanning message history.
-3. Filter/search the list and mark chats with checkboxes.
-4. Click `Экспорт выбранных`.
-5. Pick an output folder.
+3. Select which media types should be downloaded: photos, videos, files, audio/voice, stickers/GIFs, or other attachments.
+4. Filter/search the list and mark one or more chats with checkboxes.
+5. Click `Запустить бекап выбранных`.
+6. Pick an output folder.
 
 The app creates a timestamped `TG_Deleter_export_*` folder. Export is intentionally streamed to disk so large chats do not have to fit in memory.
 

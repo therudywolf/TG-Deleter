@@ -4,7 +4,7 @@
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
-from core import Place, get_scan_include_groups, get_scan_include_channels, get_scan_include_private
+from core import Place, get_export_include_media, get_scan_include_groups, get_scan_include_channels, get_scan_include_private
 from ui.theme import (
     PAD,
     PAD_SM,
@@ -38,6 +38,10 @@ class ExportFrame(ctk.CTkFrame):
         self._loading = False
         self._paused = False
         self._selected_card = None
+        self._export_total_chats = 0
+        self._export_done_chats = 0
+        self._export_total_messages = None
+        self._export_done_messages = 0
 
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", pady=(0, PAD_SM))
@@ -60,6 +64,40 @@ class ExportFrame(ctk.CTkFrame):
         self.check_private = ctk.BooleanVar(value=get_scan_include_private())
         ctk.CTkCheckBox(row, text="Личку", variable=self.check_private).pack(side="left", padx=PAD_SM)
 
+        media_block = ctk.CTkFrame(inner, fg_color="transparent")
+        media_block.pack(fill="x", pady=(PAD_SM, 0))
+        ctk.CTkLabel(media_block, text="Бекап медиа:").pack(anchor="w")
+        self.include_media_var = ctk.BooleanVar(value=get_export_include_media())
+        ctk.CTkCheckBox(
+            media_block,
+            text="Скачивать вложения",
+            variable=self.include_media_var,
+            command=self._toggle_media_options,
+        ).pack(anchor="w", pady=(PAD_SM, 0))
+        self.media_type_vars = {
+            "photos": ctk.BooleanVar(value=True),
+            "videos": ctk.BooleanVar(value=True),
+            "documents": ctk.BooleanVar(value=True),
+            "audio": ctk.BooleanVar(value=True),
+            "stickers": ctk.BooleanVar(value=True),
+            "other": ctk.BooleanVar(value=True),
+        }
+        self.media_type_checks = []
+        type_grid = ctk.CTkFrame(media_block, fg_color="transparent")
+        type_grid.pack(fill="x", pady=(PAD_SM, 0))
+        for idx, (key, label) in enumerate((
+            ("photos", "Фото"),
+            ("videos", "Видео"),
+            ("documents", "Файлы"),
+            ("audio", "Аудио/voice"),
+            ("stickers", "Стикеры/GIF"),
+            ("other", "Прочее"),
+        )):
+            cb = ctk.CTkCheckBox(type_grid, text=label, variable=self.media_type_vars[key], width=150)
+            cb.grid(row=idx // 3, column=idx % 3, sticky="w", padx=(0, PAD), pady=2)
+            self.media_type_checks.append(cb)
+        self._toggle_media_options()
+
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.pack(fill="x", pady=(0, PAD_SM))
         self.load_btn = ctk.CTkButton(
@@ -75,10 +113,10 @@ class ExportFrame(ctk.CTkFrame):
         self.load_btn.pack(side="right", padx=PAD_SM)
         self.export_btn = ctk.CTkButton(
             actions,
-            text="Экспорт выбранных",
+            text="Запустить бекап выбранных",
             command=self._export_selected,
             corner_radius=BTN_RADIUS,
-            width=160,
+            width=210,
             height=36,
             fg_color=BTN_SECONDARY,
             state="disabled",
@@ -148,6 +186,13 @@ class ExportFrame(ctk.CTkFrame):
         self.progress = ctk.CTkProgressBar(self, mode="indeterminate", height=4)
         self.progress.pack(fill="x", pady=(0, PAD))
         self.progress.pack_forget()
+        self.export_progress = ctk.CTkProgressBar(self, mode="determinate", height=8)
+        self.export_progress.set(0)
+        self.export_progress.pack(fill="x", pady=(0, PAD_SM))
+        self.export_progress.pack_forget()
+        self.progress_detail_label = ctk.CTkLabel(self, text="", text_color=TEXT_MUTED, font=font(12), anchor="w")
+        self.progress_detail_label.pack(fill="x", pady=(0, PAD_SM))
+        self.progress_detail_label.pack_forget()
 
         header = ctk.CTkFrame(self, fg_color=("gray85", "gray16"), corner_radius=0, height=28)
         header.pack(fill="x")
@@ -165,10 +210,90 @@ class ExportFrame(ctk.CTkFrame):
         scan_stop_requested.clear()
         self.dialogs = []
         self.selected_ids.clear()
+        self._hide_export_progress()
         self._apply_filter()
         self.set_loading(True, "Загружаю")
         self.status_label.configure(text="Загружаю список диалогов...")
         self.on_load_dialogs(self.check_groups.get(), self.check_channels.get(), self.check_private.get())
+
+    def _toggle_media_options(self):
+        state = "normal" if self.include_media_var.get() else "disabled"
+        for cb in getattr(self, "media_type_checks", []):
+            cb.configure(state=state)
+
+    def get_export_options(self):
+        return {
+            "include_media": bool(self.include_media_var.get()),
+            "media_types": {key: bool(var.get()) for key, var in self.media_type_vars.items()},
+        }
+
+    def _hide_export_progress(self):
+        self._export_total_chats = 0
+        self._export_done_chats = 0
+        self._export_total_messages = None
+        self._export_done_messages = 0
+        self.export_progress.set(0)
+        self.export_progress.pack_forget()
+        self.progress_detail_label.configure(text="")
+        self.progress_detail_label.pack_forget()
+
+    def start_export_progress(self, total_chats, parallel_chats=None):
+        self._loading = True
+        self._paused = False
+        self._export_total_chats = int(total_chats or 0)
+        self._export_done_chats = 0
+        self._export_total_messages = None
+        self._export_done_messages = 0
+        self.load_btn.configure(state="disabled", text="Бекап")
+        self.export_btn.configure(state="disabled")
+        self.pause_btn.configure(state="normal", text="Пауза")
+        self.stop_btn.configure(state="normal")
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.export_progress.pack(fill="x", pady=(0, PAD_SM))
+        self.export_progress.set(0)
+        self.progress_detail_label.pack(fill="x", pady=(0, PAD_SM))
+        parallel_text = f", параллельно: {parallel_chats}" if parallel_chats else ""
+        self.progress_detail_label.configure(text=f"Чаты: 0/{self._export_total_chats}{parallel_text}. Сообщения: 0.")
+
+    def update_export_progress(self, payload, current_title=None):
+        total_chats = payload.get("total_chats")
+        done_chats = payload.get("done_chats")
+        done_messages = payload.get("done_messages")
+        total_messages = payload.get("total_messages")
+        total_messages_known = bool(payload.get("total_messages_known"))
+        if total_chats is not None:
+            self._export_total_chats = int(total_chats or 0)
+        if done_chats is not None:
+            self._export_done_chats = int(done_chats or 0)
+        if done_messages is not None:
+            self._export_done_messages = int(done_messages or 0)
+        self._export_total_messages = int(total_messages) if total_messages is not None else None
+
+        if self._export_total_messages:
+            ratio = self._export_done_messages / max(1, self._export_total_messages)
+        elif self._export_total_chats:
+            ratio = self._export_done_chats / max(1, self._export_total_chats)
+        else:
+            ratio = 0
+        self.export_progress.set(max(0, min(1, ratio)))
+
+        parts = [f"Чаты: {self._export_done_chats}/{self._export_total_chats or 0}"]
+        if self._export_total_messages is not None:
+            left = max(0, self._export_total_messages - self._export_done_messages)
+            suffix = "" if total_messages_known else "+"
+            parts.append(f"Сообщения: {self._export_done_messages}/{self._export_total_messages}{suffix}, осталось: {left}{suffix}")
+        else:
+            parts.append(f"Сообщения: {self._export_done_messages}")
+        if current_title:
+            short = (str(current_title)[:48] + "…") if len(str(current_title)) > 48 else str(current_title)
+            parts.append(f"Сейчас: {short}")
+        self.progress_detail_label.configure(text=" · ".join(parts))
+
+    def finish_export_progress(self, stopped=False):
+        if not stopped:
+            self.export_progress.set(1)
+        self.set_loading(False)
 
     def set_loading(self, loading: bool, label: str | None = None):
         self._loading = loading
@@ -338,6 +463,9 @@ class ExportFrame(ctk.CTkFrame):
         if not selected:
             messagebox.showinfo("Экспорт", "Отметьте один или несколько чатов.")
             return
+        if self.include_media_var.get() and not any(var.get() for var in self.media_type_vars.values()):
+            messagebox.showwarning("Экспорт", "Выберите хотя бы один тип медиа или отключите скачивание вложений.")
+            return
         folder = filedialog.askdirectory(title="Папка для экспорта")
         if folder:
-            self.on_export_places(folder, selected)
+            self.on_export_places(folder, selected, self.get_export_options())

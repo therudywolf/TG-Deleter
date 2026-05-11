@@ -37,7 +37,6 @@ def main():
         "--hidden-import", "pyrogram",
         "--hidden-import", "pyrogram.errors",
         "--hidden-import", "pyrogram.enums",
-        "--hidden-import", "tgcrypto",
         "--hidden-import", "customtkinter",
         "--hidden-import", "PIL",
         "--hidden-import", "PIL.Image",
