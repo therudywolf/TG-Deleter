@@ -346,13 +346,16 @@ class LoginDialog(ctk.CTkToplevel):
         self._status_label.configure(text_color=color)
 
     def _cleanup_loop(self):
-        """Безопасно останавливает фоновый loop."""
+        """Безопасно останавливает фоновый loop и ждёт завершения потока."""
         if self._client is not None:
             try:
-                asyncio.run_coroutine_threadsafe(self._client.disconnect(), self._loop)
+                future = asyncio.run_coroutine_threadsafe(self._client.disconnect(), self._loop)
+                future.result(timeout=3)
             except Exception:
                 pass
         self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._bg_thread.is_alive():
+            self._bg_thread.join(timeout=3)
 
     def _on_close(self):
         if self._busy:

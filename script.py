@@ -19,6 +19,7 @@ from core import (
     create_client,
     get_current_session,
     set_current_session,
+    normalize_session_name,
     set_app,
     set_me_from_dict,
     fetch_and_set_my_channels,
@@ -163,32 +164,33 @@ async def main_cli(chat_title: str | None = None):
 async def _cli_run(app):
     """Использует переданный клиент app (уже в async with app в вызывающем коде)."""
     set_app(app)
-    # Для check_if_mine нужны my_user_id/my_username — в GUI это делает воркер, в CLI делаем здесь
     try:
-        me = await app.get_me()
-        me_dict = {
-            "id": getattr(me, "id", None),
-            "username": (getattr(me, "username", None) or "").strip() or None,
-            "first_name": getattr(me, "first_name", None) or None,
-            "last_name": getattr(me, "last_name", None) or None,
-        }
-        set_me_from_dict(me_dict)
-    except Exception as e:
-        log.warning("CLI get_me failed: %s", e)
-    try:
-        await fetch_and_set_my_channels(app)
-    except Exception as e:
-        log.warning("CLI fetch_and_set_my_channels failed: %s", e)
-    # Резолвим название чата один раз
-    chat_title = None
-    try:
-        cid = get_chat_id_cli()
-        if cid is not None:
-            chat_info = await app.get_chat(cid)
-            chat_title = getattr(chat_info, "title", None) or str(cid)
-    except Exception as e:
-        log.warning("CLI get_chat title failed: %s", e)
-    await main_cli(chat_title=chat_title)
+        try:
+            me = await app.get_me()
+            me_dict = {
+                "id": getattr(me, "id", None),
+                "username": (getattr(me, "username", None) or "").strip() or None,
+                "first_name": getattr(me, "first_name", None) or None,
+                "last_name": getattr(me, "last_name", None) or None,
+            }
+            set_me_from_dict(me_dict)
+        except Exception as e:
+            log.warning("CLI get_me failed: %s", e)
+        try:
+            await fetch_and_set_my_channels(app)
+        except Exception as e:
+            log.warning("CLI fetch_and_set_my_channels failed: %s", e)
+        chat_title = None
+        try:
+            cid = get_chat_id_cli()
+            if cid is not None:
+                chat_info = await app.get_chat(cid)
+                chat_title = getattr(chat_info, "title", None) or str(cid)
+        except Exception as e:
+            log.warning("CLI get_chat title failed: %s", e)
+        await main_cli(chat_title=chat_title)
+    finally:
+        set_app(None)
 
 
 def parse_args():
@@ -208,7 +210,10 @@ def parse_args():
         if "--login" in sys.argv:
             args.command = "login"
             idx = sys.argv.index("--login")
-            args.session = sys.argv[idx + 1].strip() if idx + 1 < len(sys.argv) else None
+            if idx + 1 < len(sys.argv):
+                args.session = sys.argv[idx + 1].strip()
+            else:
+                args.session = None
         elif "--cli" in sys.argv:
             args.command = "cli"
             args.chat_id = None
@@ -223,14 +228,15 @@ def parse_args():
     return args
 
 
-if __name__ == "__main__":
+def main():
     args = parse_args()
 
     if args.command == "login":
         _require_api()
         session = getattr(args, "session", None)
+        session = normalize_session_name(session)
         if not session:
-            print("Укажите имя сессии: python script.py login имя_сессии")
+            print("Укажите безопасное имя сессии: 2-64 символа, только буквы, цифры, _ и -.")
             sys.exit(1)
         add_account(session)
         set_current_session(session)
@@ -276,3 +282,7 @@ if __name__ == "__main__":
     else:
         from gui import run_gui
         run_gui()
+
+
+if __name__ == "__main__":
+    main()

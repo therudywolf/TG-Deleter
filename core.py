@@ -8,6 +8,7 @@ import sys
 import json
 import logging
 import asyncio
+import math
 import re
 import html
 import time
@@ -47,6 +48,8 @@ _APP_DEFAULTS = {
 }
 _api_config_cache = None
 _app_config_cache = None
+_config_lock = threading.Lock()
+_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{2,64}$")
 
 
 class AppState:
@@ -76,16 +79,23 @@ class AppState:
             self.first_name = None
             self.last_name = None
             self.channel_ids = set()
+            self.client = None
 
     def set_channels(self, ids: set[int]) -> None:
         with self._lock:
             self.channel_ids = set(ids)
 
     def set_client(self, client: Client | None) -> None:
-        self.client = client
+        with self._lock:
+            self.client = client
 
     def get_client(self) -> Client | None:
-        return self.client
+        with self._lock:
+            return self.client
+
+    def get_user_id(self) -> int | None:
+        with self._lock:
+            return self.user_id
 
 
 state = AppState()
@@ -103,14 +113,17 @@ def _int(val, default=None):
         return default
     try:
         return int(val)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 def _float(val, default=0.2):
     if val is None or val == "":
         return default
     try:
-        return float(val)
+        result = float(val)
+        if not math.isfinite(result):
+            return default
+        return result
     except (TypeError, ValueError):
         return default
 
@@ -227,10 +240,11 @@ def load_api_config() -> dict:
             with open(path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
-                data.update(loaded)
+                data.update({k: v for k, v in loaded.items() if k in _API_DEFAULTS or k in ("theme", "export_media_types_filter")})
         except Exception as e:
             log.warning("load_api_config failed: %s", e)
-    _api_config_cache = data
+    with _config_lock:
+        _api_config_cache = data
     return data
 
 
@@ -240,24 +254,33 @@ def save_api_config(data: dict) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
-        _api_config_cache = dict(data)
+        with _config_lock:
+            _api_config_cache = dict(data)
     except Exception as e:
         log.warning("save_api_config failed: %s", e)
 
 
 def get_api_config() -> dict:
     global _api_config_cache
-    if _api_config_cache is None:
-        load_api_config()
-    return dict(_api_config_cache)
+    with _config_lock:
+        if _api_config_cache is None:
+            pass
+        else:
+            return dict(_api_config_cache)
+    load_api_config()
+    with _config_lock:
+        return dict(_api_config_cache)
 
 
 def get_api_config_readonly() -> MappingProxyType:
     """Read-only view, no copy overhead."""
     global _api_config_cache
-    if _api_config_cache is None:
-        load_api_config()
-    return MappingProxyType(_api_config_cache)
+    with _config_lock:
+        if _api_config_cache is not None:
+            return MappingProxyType(_api_config_cache)
+    load_api_config()
+    with _config_lock:
+        return MappingProxyType(_api_config_cache)
 
 
 def reset_api_config() -> None:
@@ -331,7 +354,8 @@ def load_config() -> dict:
                 data.update({k: loaded[k] for k in _APP_DEFAULTS if k in loaded})
         except Exception as e:
             log.warning("load_config failed: %s", e)
-    _app_config_cache = data
+    with _config_lock:
+        _app_config_cache = data
     return data
 
 
@@ -341,16 +365,20 @@ def save_config(data: dict) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
-        _app_config_cache = dict(data)
+        with _config_lock:
+            _app_config_cache = dict(data)
     except Exception as e:
         log.warning("save_config failed: %s", e)
 
 
 def get_config() -> dict:
     global _app_config_cache
-    if _app_config_cache is None:
-        load_config()
-    return dict(_app_config_cache)
+    with _config_lock:
+        if _app_config_cache is not None:
+            return dict(_app_config_cache)
+    load_config()
+    with _config_lock:
+        return dict(_app_config_cache)
 
 
 def get_config_value(key: str):
@@ -434,7 +462,7 @@ def get_accounts_list() -> list[str]:
     """Список имён сессий из config.json. Может быть пустым."""
     acc = get_config_value("accounts")
     if isinstance(acc, list):
-        return [str(x).strip() for x in acc if str(x).strip()]
+        return [name for x in acc if (name := normalize_session_name(str(x).strip()))]
     return []
 
 
@@ -445,7 +473,7 @@ def save_accounts_list(accounts: list[str]) -> None:
 
 def add_account(session_name: str) -> bool:
     """Добавить аккаунт (сессию) в список. Не дублирует."""
-    name = (session_name or "").strip()
+    name = normalize_session_name(session_name)
     if not name:
         return False
     accounts = get_accounts_list()
@@ -458,7 +486,7 @@ def add_account(session_name: str) -> bool:
 
 def remove_account(session_name: str) -> bool:
     """Удалить аккаунт из списка. Файл сессии не удаляется."""
-    name = (session_name or "").strip()
+    name = normalize_session_name(session_name)
     if not name:
         return False
     accounts = get_accounts_list()
@@ -480,16 +508,33 @@ def get_current_session() -> str | None:
 
 def get_cache_session_key() -> str:
     """Ключ сессии для имени файла кэша: текущая сессия или имя по умолчанию, если аккаунтов нет."""
-    return get_current_session() or (get_config_value("session_name") or "session").strip()
+    return get_current_session() or normalize_session_name(get_config_value("session_name")) or "session"
 
 
-def set_current_session(session_name: str) -> None:
+def set_current_session(session_name: str | None) -> None:
     """Сохранить выбранную сессию в config."""
-    set_config_value("current_session", session_name)
+    if session_name is None:
+        set_config_value("current_session", None)
+        return
+    name = normalize_session_name(session_name)
+    if not name:
+        raise ValueError("Имя сессии: 2-64 символа, только буквы, цифры, _ и -.")
+    set_config_value("current_session", name)
+
+
+def normalize_session_name(session_name: str | None) -> str | None:
+    """Return a safe Pyrogram session name or None if it can escape the app directory."""
+    name = (session_name or "").strip()
+    if not _SESSION_NAME_RE.fullmatch(name):
+        return None
+    return name
 
 
 def create_client(session_name: str) -> Client:
     """Создать Pyrogram Client для указанной сессии."""
+    session_name = normalize_session_name(session_name)
+    if not session_name:
+        raise ValueError("Имя сессии: 2-64 символа, только буквы, цифры, _ и -.")
     api_id = get_api_id()
     api_hash = get_api_hash()
     if not api_id or not api_hash:
@@ -637,25 +682,10 @@ async def check_if_mine(message) -> bool:
     try:
         if getattr(message, "out", None) is True or getattr(message, "outgoing", None) is True:
             return True
-        sender_chat = getattr(message, "sender_chat", None)
-        if sender_chat and state.channel_ids and getattr(sender_chat, "id", None) in state.channel_ids:
-            return True
         if message.from_user:
             uid = message.from_user.id
-            uname = (getattr(message.from_user, "username") or "").strip()
-            if state.user_id is not None and uid == state.user_id:
-                return True
-            if state.username and uname and uname.lower() == state.username.lower():
-                return True
-        sig = getattr(message, "author_signature", None)
-        if sig:
-            sig_l = str(sig).lower()
-            sig_words = re.findall(r"\w+", sig_l)
-            if state.username and state.username.lower() in sig_words:
-                return True
-            if state.first_name and state.first_name.lower() in sig_words:
-                return True
-            if state.last_name and state.last_name.lower() in sig_words:
+            my_uid = state.get_user_id()
+            if my_uid is not None and uid == my_uid:
                 return True
         return False
     except (UnicodeDecodeError, UnicodeEncodeError, TypeError, ValueError, AttributeError):
@@ -684,7 +714,10 @@ def _message_date_str(message) -> str:
     d = getattr(message, "date", None)
     if d is None:
         return ""
-    return d.strftime("%Y-%m-%d %H:%M")
+    try:
+        return d.strftime("%Y-%m-%d %H:%M")
+    except (AttributeError, TypeError, ValueError):
+        return ""
 
 
 async def delete_message_ids(cid: int, message_ids, pause_event=None, stop_event=None, progress_callback=None) -> list[int]:
@@ -707,6 +740,9 @@ async def delete_message_ids(cid: int, message_ids, pause_event=None, stop_event
             break
         batch = message_ids[batch_start:batch_start + BATCH_SIZE]
         batch_int = [int(mid) for mid in batch]
+        batch_int = await _filter_owned_message_ids(client, cid, batch_int, pause_event, stop_event)
+        if not batch_int:
+            continue
         while True:
             try:
                 await client.delete_messages(cid, batch_int)
@@ -745,13 +781,48 @@ async def delete_message_ids(cid: int, message_ids, pause_event=None, stop_event
     return deleted_ids
 
 
+async def _filter_owned_message_ids(client: Client, cid: int, message_ids: list[int], pause_event=None, stop_event=None) -> list[int]:
+    """Fetch requested messages and keep only IDs still proven to belong to the current user."""
+    owned: list[int] = []
+    if not message_ids:
+        return owned
+    try:
+        messages = await client.get_messages(cid, message_ids)
+        if not isinstance(messages, list):
+            messages = [messages]
+    except FloodWait as e:
+        log.warning("FloodWait ownership recheck: waiting %s sec", e.value)
+        if not await _sleep_responsive(e.value, pause_event, stop_event):
+            return owned
+        try:
+            messages = await client.get_messages(cid, message_ids)
+            if not isinstance(messages, list):
+                messages = [messages]
+        except Exception as e2:
+            log.warning("ownership recheck failed after FloodWait: %s", e2)
+            return owned
+    except Exception as e:
+        log.warning("ownership recheck failed: %s", e)
+        return owned
+    for message in messages:
+        if _is_stopped(stop_event):
+            break
+        if message and await check_if_mine(message):
+            owned.append(int(message.id))
+    skipped = len(message_ids) - len(owned)
+    if skipped:
+        log.warning("delete_message_ids skipped %s messages that failed ownership recheck", skipped)
+    return owned
+
+
 async def scan_chat(cid: int, pause_event=None, stop_event=None) -> list[tuple[int, str, str]]:
     """
     Сканирует один чат и возвращает список своих сообщений: [(message_id, preview, date_str), ...].
     """
     log.debug("scan_chat: chat_id=%s", cid)
     result = []
-    kwargs = {"limit": get_scan_limit()} if get_scan_limit() else {}
+    scan_limit = get_scan_limit()
+    kwargs = {"limit": scan_limit} if scan_limit else {}
     client = get_app()
     if not client:
         return result
@@ -927,7 +998,8 @@ async def delete_all_my_in_chat_no_scan(cid: int, progress_callback=None, pause_
     Возвращает количество удалённых.
     """
     log.debug("delete_all_my_in_chat_no_scan: chat_id=%s", cid)
-    kwargs = {"limit": get_scan_limit()} if get_scan_limit() else {}
+    scan_limit = get_scan_limit()
+    kwargs = {"limit": scan_limit} if scan_limit else {}
     count = 0
     client = get_app()
     if not client:
@@ -973,6 +1045,12 @@ async def delete_all_my_in_chat_no_scan(cid: int, progress_callback=None, pause_
     return count
 
 
+_WINDOWS_RESERVED = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
 def _safe_filename(value, fallback="chat", max_len=80):
     """Безопасное имя папки/файла для Windows и Linux."""
     text = str(value or "").strip() or fallback
@@ -980,7 +1058,10 @@ def _safe_filename(value, fallback="chat", max_len=80):
     text = re.sub(r"\s+", " ", text).strip(" .")
     if not text:
         text = fallback
-    return text[:max_len].rstrip(" .") or fallback
+    text = text[:max_len].rstrip(" .") or fallback
+    if text.split(".")[0].upper() in _WINDOWS_RESERVED:
+        text = "_" + text
+    return text
 
 
 def _message_sender_name(message):
@@ -1107,9 +1188,10 @@ def _html_message(record):
     if media:
         media_escaped = html.escape(media)
         media_html = f'<div><a href="{media_escaped}">media</a></div>'
+    msg_id = html.escape(str(record.get('id', '')))
     return (
         "<article class=\"msg\">"
-        f"<div class=\"meta\">{date} · {sender} · id {record.get('id')}</div>"
+        f"<div class=\"meta\">{date} · {sender} · id {msg_id}</div>"
         f"<div class=\"text\">{text}</div>{media_html}</article>\n"
     )
 
@@ -1305,10 +1387,17 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
                     **overall_payload(),
                 )
             except FloodWait as e:
-                stats["status"] = "flood_wait"
-                stats["error"] = f"FloodWait {e.value}"
-                log.warning("FloodWait export chat %s: %s", chat_id, e.value)
-                await _sleep_responsive(e.value, pause_event, stop_event)
+                log.warning("FloodWait export chat %s: %s sec, retrying", chat_id, e.value)
+                if await _sleep_responsive(e.value, pause_event, stop_event):
+                    try:
+                        chat = await client.get_chat(chat_id)
+                        title = _chat_title(chat)
+                    except Exception:
+                        pass
+                    stats["status"] = "flood_retry"
+                else:
+                    stats["status"] = "flood_wait"
+                    stats["error"] = f"FloodWait {e.value}"
             except Exception as e:
                 stats["status"] = "error"
                 stats["error"] = str(e)
@@ -1325,6 +1414,10 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
         emit("overall_progress", **overall_payload())
         if _is_stopped(stop_event):
             manifest["stopped"] = True
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            break
 
     manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
     manifest["total_messages"] = sum(c.get("messages", 0) for c in manifest["chats"])

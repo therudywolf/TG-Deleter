@@ -125,9 +125,9 @@ class App:
         self.log_text.insert("end", "Здесь выводятся сообщения авторизации и работы приложения.\n")
         self.log_text.see("end")
 
-        handler = QueueLogHandler()
-        handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S"))
-        log.addHandler(handler)
+        self._log_handler = QueueLogHandler()
+        self._log_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S"))
+        log.addHandler(self._log_handler)
 
         self._msg_handlers = {
             # Typed message class names
@@ -234,7 +234,7 @@ class App:
         path = self._geometry_config_path()
         if os.path.isfile(path):
             try:
-                with open(path, "r") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 geo = data.get("geometry", "960x600")
                 self.root.geometry(geo)
@@ -245,7 +245,7 @@ class App:
 
     def _save_window_geometry(self):
         try:
-            with open(self._geometry_config_path(), "w") as f:
+            with open(self._geometry_config_path(), "w", encoding="utf-8") as f:
                 json.dump({"geometry": self.root.geometry()}, f)
         except Exception:
             pass
@@ -409,6 +409,8 @@ class App:
     # ------------------------------------------------------------------
 
     def _check_queue(self):
+        if self._closing:
+            return
         try:
             try:
                 while True:
@@ -417,6 +419,8 @@ class App:
                 pass
             while True:
                 msg = response_queue.get_nowait()
+                if self._closing:
+                    break
                 try:
                     if isinstance(msg, tuple):
                         key = msg[0]
@@ -497,7 +501,6 @@ class App:
         else:
             status = f"Проверено диалогов: {n}. Текущий: {short}"
         self.places_frame.status_label.configure(text=status)
-        self.root.update_idletasks()
 
     def _handle_scan_place(self, msg):
         log.debug("Got scan_place")
@@ -516,18 +519,20 @@ class App:
             self.places = msg[1]
             stopped = msg[2] if len(msg) > 2 else False
             session = msg[3] if len(msg) > 3 else get_current_session()
-        save_places_to_cache(self.places, session)
         mtime = get_cache_mtime_str(session)
         self._operation_running = False
         if self._pending_switch_session and session != self._pending_switch_session:
             self.places_frame.set_scanning(False)
             self.places_frame.status_label.configure(text="Операция остановлена. Переключаю аккаунт...")
             return
+        if not stopped:
+            save_places_to_cache(self.places, session)
+            mtime = get_cache_mtime_str(session)
         self.places_frame.set_places(self.places)
         self.places_frame.set_scanning(False)
         if stopped:
             self.places_frame.status_label.configure(
-                text=f"Скан остановлен. Найдено чатов: {len(self.places)}. Кэш обновлён ({mtime})."
+                text=f"Скан остановлен. Найдено чатов: {len(self.places)}. Кэш не обновлялся."
             )
         elif len(self.places) == 0:
             self.places_frame.status_label.configure(
@@ -789,6 +794,7 @@ class App:
         if self._closing:
             return
         self._closing = True
+        log.removeHandler(self._log_handler)
         scan_stop_requested.set()
         scan_paused.clear()
         self._save_window_geometry()

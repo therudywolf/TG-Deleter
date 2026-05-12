@@ -299,8 +299,9 @@ def worker_loop():
                         except Exception as e:
                             if FloodWait is not None and isinstance(e, FloodWait):
                                 response_queue.put(FloodWaitMsg(seconds=e.value, operation=req[0]))
-                                log.warning("FloodWait: waiting %s seconds for %s", e.value, req[0])
+                                log.warning("FloodWait: waiting %s seconds for %s, will retry", e.value, req[0])
                                 await asyncio.sleep(e.value)
+                                request_queue.put(req)
                             else:
                                 log.exception("worker error in %s: %s", req[0], e)
                                 response_queue.put(ErrorMsg(operation=req[0], error=str(e)))

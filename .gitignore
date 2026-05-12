@@ -1,26 +1,66 @@
+# Credentials & local configs
 .env
+.env.*
+!.env.example
 config.json
 api_config.json
 accounts_profiles.json
+accounts.json
+current_account.json
+
+# Telegram sessions & databases
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+*.session.bak
+*.sqlite
+*.sqlite3
+*.db
+
+# Build artifacts
 build/
 dist/
 *.spec
 TGDeleter.exe
-*.session
-*.session-journal
+
+# Python bytecode & caches
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Scan caches & window state
 scan_cache.json
 scan_cache_*.json
 window_state.json
-temp/
+
+# Virtual environments
 venv/
 .venv/
+env/
+
+# Exports & temp files
 exports/
 TG_Deleter_export_*/
+temp/
+*.tmp
+
+# Logs
 *.log
 *_out.txt
 cli_*.txt
 gui_*.txt
 run_cli_check.txt
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

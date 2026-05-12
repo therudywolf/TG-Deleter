@@ -1,6 +1,6 @@
 # TG Deleter
 
-Desktop utility for managing your Telegram messages across multiple accounts.
+AGPL-licensed desktop utility for managing your Telegram messages across multiple accounts.
 Scan dialogs for your own messages, delete them selectively or in bulk,
 and export entire chats with media to a local archive.
 
@@ -47,8 +47,10 @@ On Windows you can also run `run.bat` — it creates/uses `venv` automatically.
 ### CLI Login
 
 ```bash
-python script.py login --session my_account --phone +71234567890
+python script.py login my_account
 ```
+
+Pyrogram will interactively prompt for your phone number and the verification code.
 
 ## Export
 
@@ -59,6 +61,17 @@ python script.py login --session my_account --phone +71234567890
 5. Click **Запустить бекап выбранных** and choose an output folder.
 
 A timestamped `TG_Deleter_export_*` folder is created with `messages.jsonl`, `messages.html`, optional `media/`, and `manifest.json` per chat.
+Avoid saving ad hoc exports directly into the repository root unless you intentionally want to inspect them locally; exported chats can contain private Telegram data.
+
+## Docker (CLI mode)
+
+```bash
+docker build -t tg-deleter .
+docker run -it -v $(pwd):/app tg-deleter login my_account
+docker run -it -v $(pwd):/app tg-deleter cli --chat-id -1001234567890
+```
+
+The volume mount preserves session files and configs between runs.
 
 ## Build
 
@@ -77,6 +90,12 @@ pip install -e ".[dev]"
 pytest
 ```
 
+Runtime dependencies are listed in `requirements.txt`. Build and test tooling is available through optional extras:
+
+```bash
+pip install -e ".[build,dev]"
+```
+
 ## Privacy
 
 The following local files contain account data and **must not** be committed:
@@ -87,6 +106,8 @@ The following local files contain account data and **must not** be committed:
 
 All patterns are covered by `.gitignore`.
 
+The repository history has been cleaned of local account profile files. If you ever committed a real Telegram API hash, session file, exported chat, or account profile to a public fork, revoke or rotate the affected credentials and sessions.
+
 ## License
 
-[MIT](LICENSE)
+TG Deleter is free software licensed under the [GNU Affero General Public License v3.0 only](LICENSE).

@@ -43,6 +43,7 @@ class PlacesFrame(ctk.CTkFrame):
         self._selected_card = None
         self._selected_place = None
         self._search_job = None
+        self._rendered_count = 0
 
         # Заголовок
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -186,8 +187,13 @@ class PlacesFrame(ctk.CTkFrame):
         self.delete_batch_btn.pack(pady=PAD_SM)
 
     def _schedule_filter(self):
+        if not self.winfo_exists():
+            return
         if self._search_job is not None:
-            self.after_cancel(self._search_job)
+            try:
+                self.after_cancel(self._search_job)
+            except Exception:
+                pass
         self._search_job = self.after(300, self._apply_sort_filter)
 
     def _set_section(self, key):
@@ -299,11 +305,8 @@ class PlacesFrame(ctk.CTkFrame):
         return card
 
     def _on_card_click(self, card: ChatCard):
-        if getattr(self, "_selected_card", None) is not None:
-            try:
-                self._selected_card.configure(fg_color=CARD_BG)
-            except Exception:
-                pass
+        if self._selected_card is not None and self._selected_card.winfo_exists():
+            self._selected_card.configure(fg_color=CARD_BG)
         card.configure(fg_color=("gray75", "gray28"))
         self._selected_card = card
         self._selected_place = card.place
@@ -320,9 +323,9 @@ class PlacesFrame(ctk.CTkFrame):
         for widget in self.scroll.winfo_children():
             if not isinstance(widget, ChatCard):
                 widget.destroy()
-        rendered_count = len([w for w in self.scroll.winfo_children() if isinstance(w, ChatCard)])
-        if rendered_count < VISIBLE_LIMIT:
+        if self._rendered_count < VISIBLE_LIMIT:
             self._build_place_card(place)
+            self._rendered_count += 1
         self._update_counter()
 
     def _apply_sort_filter(self):
@@ -345,6 +348,8 @@ class PlacesFrame(ctk.CTkFrame):
             items = sorted(base, key=lambda p: (p.title or "").lower())
         for w in self.scroll.winfo_children():
             w.destroy()
+        self._rendered_count = 0
+        self._selected_card = None
         if not items:
             self._show_empty_places()
             self._selected_place = None
@@ -352,6 +357,7 @@ class PlacesFrame(ctk.CTkFrame):
         rendered = items[:VISIBLE_LIMIT]
         for p in rendered:
             self._build_place_card(p)
+        self._rendered_count = len(rendered)
         if len(items) > VISIBLE_LIMIT:
             more = ctk.CTkFrame(self.scroll, fg_color="transparent")
             more.pack(fill="x", pady=PAD_SM)

@@ -54,11 +54,21 @@ def bind_tooltip(widget, text: str, delay_ms: int = 500):
 
     def on_enter(e):
         if job[0] is not None:
-            widget.after_cancel(job[0])
-        job[0] = widget.after(delay_ms, show)
+            try:
+                widget.after_cancel(job[0])
+            except Exception:
+                pass
+        try:
+            job[0] = widget.after(delay_ms, show)
+        except Exception:
+            pass
 
     def on_leave(e):
         hide()
 
+    def on_destroy(e):
+        hide()
+
     widget.bind("<Enter>", on_enter)
     widget.bind("<Leave>", on_leave)
+    widget.bind("<Destroy>", on_destroy)

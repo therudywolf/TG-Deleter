@@ -23,6 +23,12 @@ def _get_cached_avatar(session_name: str) -> str | None:
         return None
     if not os.path.isabs(avatar_path):
         avatar_path = os.path.join(_PROJECT_ROOT, avatar_path)
+    try:
+        resolved = os.path.realpath(avatar_path)
+        if not resolved.startswith(os.path.realpath(_PROJECT_ROOT)):
+            return None
+    except (OSError, ValueError):
+        return None
     if not os.path.isfile(avatar_path):
         return None
     age = time.time() - os.path.getmtime(avatar_path)
@@ -33,6 +39,7 @@ def _get_cached_avatar(session_name: str) -> str | None:
 
 def _avatar_image(path, size):
     img = Image.open(path)
+    img.load()
     return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
 
 
@@ -299,6 +306,8 @@ class SidebarFrame(ctk.CTkFrame):
         self.name_label.configure(text=name)
         username = me_dict.get("username")
         self.username_label.configure(text=f"@{username}" if username else "")
-        phone = me_dict.get("phone_number")
-        self.phone_label.configure(text=phone or "")
+        phone = me_dict.get("phone_number") or ""
+        if len(phone) > 6:
+            phone = phone[:4] + "*" * (len(phone) - 6) + phone[-2:]
+        self.phone_label.configure(text=phone)
         self.set_connection_status(True)

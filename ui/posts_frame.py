@@ -35,6 +35,7 @@ class PostsFrame(ctk.CTkFrame):
         self.all_places_getter = all_places_getter
         self.current_place: Optional[Place] = None
         self.check_vars = []
+        self._search_job = None
 
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", pady=(0, PAD))
@@ -52,7 +53,7 @@ class PostsFrame(ctk.CTkFrame):
         search_row.pack(fill="x", pady=(PAD_SM, 0))
         ctk.CTkLabel(search_row, text="Поиск по тексту:").pack(side="left", padx=(0, PAD_SM))
         self.posts_search_var = ctk.StringVar()
-        self.posts_search_var.trace_add("write", lambda *a: self._refresh_posts_list())
+        self.posts_search_var.trace_add("write", lambda *a: self._schedule_search())
         ctk.CTkEntry(search_row, placeholder_text="Подстрока в превью сообщения...", textvariable=self.posts_search_var, width=300).pack(side="left")
         date_row = ctk.CTkFrame(filter_inner, fg_color="transparent")
         date_row.pack(fill="x", pady=(PAD_SM, 0))
@@ -117,6 +118,14 @@ class PostsFrame(ctk.CTkFrame):
 
         for c in range(3):
             actions_grid.columnconfigure(c, weight=1)
+
+    def _schedule_search(self):
+        if self._search_job is not None:
+            try:
+                self.after_cancel(self._search_job)
+            except Exception:
+                pass
+        self._search_job = self.after(300, self._refresh_posts_list)
 
     def set_place(self, place: Optional[Place]):
         self.current_place = place

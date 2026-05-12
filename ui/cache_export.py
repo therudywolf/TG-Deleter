@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from core import Place, get_current_session, get_cache_session_key, get_project_root
+from core import Place, get_current_session, get_cache_session_key, get_project_root, normalize_session_name
 
 log = logging.getLogger("tg_deleter")
 
@@ -18,6 +18,7 @@ _PROJECT_ROOT = get_project_root()
 def cache_path(session: Optional[str] = None) -> str:
     if session is None:
         session = get_cache_session_key()
+    session = normalize_session_name(session) or "session"
     return os.path.join(_PROJECT_ROOT, f"scan_cache_{session}.json")
 
 

@@ -38,7 +38,8 @@ class ChatCard(ctk.CTkFrame):
         cb.pack(side="left", padx=(0, PAD_SM))
 
         max_title_len = 72 if compact else 50
-        title_short = (place.title[:max_title_len] + "\u2026") if len(place.title) > max_title_len else place.title
+        title = place.title or ""
+        title_short = (title[:max_title_len] + "\u2026") if len(title) > max_title_len else title
 
         if compact:
             ctk.CTkLabel(row, text=title_short, anchor="w", font=font(13)).pack(side="left", fill="x", expand=True)

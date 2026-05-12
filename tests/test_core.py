@@ -428,3 +428,92 @@ class TestMessageText:
             media = None
             service = None
         assert _message_text(FakeMsg()) == ""
+
+
+class TestSessionNames:
+    """Tests for shared session name validation."""
+
+    def test_valid_session_name(self):
+        from core import normalize_session_name
+        assert normalize_session_name("account_1-test") == "account_1-test"
+
+    def test_rejects_path_traversal(self):
+        from core import normalize_session_name
+        assert normalize_session_name("../account") is None
+        assert normalize_session_name("nested/account") is None
+
+    def test_rejects_too_short(self):
+        from core import normalize_session_name
+        assert normalize_session_name("a") is None
+
+
+class TestOwnershipSafety:
+    """Tests for conservative ownership checks used before deletion."""
+
+    @pytest.mark.asyncio
+    async def test_author_signature_is_not_ownership(self):
+        from core import check_if_mine, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "alice", "first_name": "Alice", "last_name": "Admin"})
+
+        class FakeMsg:
+            out = False
+            outgoing = False
+            from_user = None
+            author_signature = "Alice"
+
+        assert await check_if_mine(FakeMsg()) is False
+
+    @pytest.mark.asyncio
+    async def test_sender_chat_is_not_ownership(self):
+        from core import check_if_mine, set_my_channels
+
+        set_my_channels({123})
+
+        class FakeSenderChat:
+            id = 123
+
+        class FakeMsg:
+            out = False
+            outgoing = False
+            from_user = None
+            sender_chat = FakeSenderChat()
+
+        assert await check_if_mine(FakeMsg()) is False
+
+    @pytest.mark.asyncio
+    async def test_delete_rechecks_message_ownership(self):
+        from core import delete_message_ids, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "alice"})
+
+        class FakeUser:
+            def __init__(self, user_id):
+                self.id = user_id
+                self.username = None
+
+        class FakeMsg:
+            out = False
+            outgoing = False
+
+            def __init__(self, message_id, user_id):
+                self.id = message_id
+                self.from_user = FakeUser(user_id)
+
+        class FakeClient:
+            def __init__(self):
+                self.deleted = []
+
+            async def get_messages(self, cid, message_ids):
+                return [FakeMsg(message_ids[0], 1), FakeMsg(message_ids[1], 2)]
+
+            async def delete_messages(self, cid, message_ids):
+                self.deleted.extend(message_ids if isinstance(message_ids, list) else [message_ids])
+
+        client = FakeClient()
+        set_app(client)
+        deleted = await delete_message_ids(100, [10, 20])
+
+        assert deleted == [10]
+        assert client.deleted == [10]
+        set_app(None)
