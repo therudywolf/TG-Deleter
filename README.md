@@ -1,8 +1,23 @@
-# TG Deleter
+# 🐺 TG Deleter
+
+> `D34D1N$1D3` :: dead inside wolf :: Telegram cleanup and export utility
+
+My resources:
+- [Gravatar](https://gravatar.com/therudywolf)
+- [OneToThree](https://onetothree.ru)
+- [Forest blog](https://t.me/theforestserver)
+- [X](https://x.com/therudywolf)
+- [GitHub](https://github.com/therudywolf)
+- [Twitch](https://twitch.tv/therudywolf)
+- [Reddit](https://reddit.com/user/Most-Watercress-6718)
+- [Telegram](https://t.me/rudy_wolf)
+- [YouTube](https://youtube.com/channel/UCXHkoSlaY5QaNmN_l4t0djQ)
 
 AGPL-licensed desktop utility for managing your Telegram messages across multiple accounts.
 Scan dialogs for your own messages, delete them selectively or in bulk,
 and export entire chats with media to a local archive.
+
+AGPL v3 Copyleft applies to reuse, modification, and network deployment of derived versions.
 
 ## Features
 
