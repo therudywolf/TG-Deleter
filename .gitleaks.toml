@@ -1,0 +1,27 @@
+title = "therudywolf workspace gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Examples, docs, and known-safe patterns"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\..*\.example$''',
+  '''\.env\.sample$''',
+  '''\.env\.secret\.example$''',
+  '''\.env\.local\.example$''',
+  '''\.env\.mesh\.example$''',
+  '''\.env\.prod\.example$''',
+  '''\.secrets\.baseline$''',
+  '''secrets\.h\.example$''',
+  '''\.gitleaks\.toml$''',
+  '''_security-templates/''',
+  '''_git-history-backups-''',
+]
+regexes = [
+  '''(?i)(example|changeme|placeholder|your_|redacted|dummy|sample|xxxxxxxx)''',
+  '''ghp_xxxxxxxx''',
+  '''BOT_TOKEN=\s*$''',
+  '''TELEGRAM_BOT_TOKEN=\s*$''',
+]
