@@ -1,10 +1,41 @@
-# 🐺 TG Deleter
+# 🐺 RudyWolf Archive: TG Deleter
 
-AGPL-licensed desktop utility for managing your Telegram messages across multiple accounts.
+> Desktop utility for managing your Telegram messages across multiple accounts.
+
+![Version](https://img.shields.io/badge/version-archive-4c8bf5)
+![Status](https://img.shields.io/badge/status-archive-6b7280)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-22c55e)](LICENSE)
+
 Scan dialogs for your own messages, delete them selectively or in bulk,
 and export entire chats with media to a local archive.
 
-AGPL v3 Copyleft applies to reuse, modification, and network deployment of derived versions.
+## Status
+
+- Archive-only repository.
+- Not intended for production use.
+- License: [AGPL-3.0-only](LICENSE) — see [SECURITY.md](SECURITY.md).
+
+## Secrets
+
+- Telegram API credentials: copy `api_config.example.json` → `api_config.json` locally only.
+- Session files (`*.session`), `config.json`, `accounts_profiles.json`, and export folders are gitignored — never commit them.
+- Rotate API credentials if they were ever pushed to a public fork.
+
+## Run
+
+```bat
+run.bat
+```
+
+Or manually:
+
+```bash
+python -m venv venv
+venv\Scripts\activate      # Windows
+pip install -r requirements.txt
+cp api_config.example.json api_config.json
+python script.py
+```
 
 ## Features
 
@@ -21,30 +52,6 @@ AGPL v3 Copyleft applies to reuse, modification, and network deployment of deriv
 
 - Python 3.10+
 - Telegram API credentials (`api_id` / `api_hash`) from <https://my.telegram.org/apps>
-
-## Quick Start
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/therudywolf/TG-Deleter.git
-cd TG-Deleter
-
-# 2. Create a virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate   # Linux / macOS
-venv\Scripts\activate      # Windows
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Copy the config template and fill in your API credentials
-cp api_config.example.json api_config.json
-
-# 5. Launch the GUI
-python script.py
-```
-
-On Windows you can also run `run.bat` — it creates/uses `venv` automatically.
 
 ### CLI Login
 
@@ -98,18 +105,6 @@ Runtime dependencies are listed in `requirements.txt`. Build and test tooling is
 pip install -e ".[build,dev]"
 ```
 
-## Privacy
+## Publication Note
 
-The following local files contain account data and **must not** be committed:
-
-- `api_config.json`, `config.json`, `accounts_profiles.json`
-- `*.session`, `scan_cache_*.json`
-- export folders (`TG_Deleter_export_*`, `exports/`)
-
-All patterns are covered by `.gitignore`.
-
-The repository history has been cleaned of local account profile files. If you ever committed a real Telegram API hash, session file, exported chat, or account profile to a public fork, revoke or rotate the affected credentials and sessions.
-
-## License
-
-TG Deleter is free software licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
+Before any push or reuse, check that no Telegram sessions, API hashes, exported chats, or account profiles are included in tracked files or history.
