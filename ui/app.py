@@ -21,6 +21,7 @@
 """
 import json
 import os
+import re
 import logging
 import threading
 from queue import Empty
@@ -36,12 +37,13 @@ from core import (
     get_export_parallel_chats,
     get_api_id,
     get_api_hash,
+    get_api_config,
     load_config,
     load_api_config,
     get_project_root,
 )
 from ui.queues import request_queue, response_queue, log_queue, scan_paused, scan_stop_requested
-from ui.theme import PAD, PAD_SM, SIDEBAR_WIDTH, font
+from ui.theme import PAD, PAD_SM, SIDEBAR_WIDTH, font, set_theme
 from ui.cache_export import load_places_from_cache, save_places_to_cache, get_cache_mtime_str, clear_cache
 from ui.places_frame import PlacesFrame
 from ui.posts_frame import PostsFrame
@@ -56,7 +58,7 @@ from ui.messages import (
     DeleteAllNoScanDoneMsg, DeleteBatchProgressMsg, DeleteBatchDoneMsg,
     ExportProgressMsg, ExportDoneMsg,
     ExportDialogsProgressMsg, ExportDialogsBatchMsg, ExportDialogsDoneMsg,
-    ErrorMsg, FloodWaitMsg,
+    ErrorMsg, FloodWaitMsg, ConnectionStatusMsg,
 )
 
 log = logging.getLogger("tg_deleter")
@@ -79,6 +81,7 @@ class App:
     def __init__(self):
         load_api_config()
         load_config()
+        set_theme(get_api_config().get("theme") or "dark")
         self.root = ctk.CTk()
         self.root.title("TG Deleter — удаление своих сообщений")
         self.root.minsize(720, 500)
@@ -169,6 +172,7 @@ class App:
             "ExportDialogsDoneMsg": self._handle_export_dialogs_done,
             "ErrorMsg": self._handle_error,
             "FloodWaitMsg": self._handle_flood_wait,
+            "ConnectionStatusMsg": self._handle_connection_status,
             # Backward compat with tuple messages
             "log_message": self._handle_log_message,
             "me": self._handle_me,
@@ -249,15 +253,35 @@ class App:
     def _geometry_config_path(self):
         return os.path.join(_PROJECT_ROOT, "window_state.json")
 
+    def _geometry_on_screen(self, geo: str) -> bool:
+        """True if a saved geometry string keeps the window title bar reachable."""
+        m = re.fullmatch(r"(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?", (geo or "").strip())
+        if not m:
+            return False
+        w, h = int(m.group(1)), int(m.group(2))
+        if w < 200 or h < 200:
+            return False
+        if m.group(3) is None:
+            return True
+        x, y = int(m.group(3)), int(m.group(4))
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        if x < -w + 100 or x > screen_w - 100:
+            return False
+        if y < 0 or y > screen_h - 100:
+            return False
+        return True
+
     def _load_window_geometry(self):
         path = self._geometry_config_path()
         if os.path.isfile(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                geo = data.get("geometry", "960x600")
-                self.root.geometry(geo)
-                return
+                geo = data.get("geometry", "")
+                if isinstance(geo, str) and self._geometry_on_screen(geo):
+                    self.root.geometry(geo)
+                    return
             except Exception:
                 pass
         self.root.geometry("960x600")
@@ -776,6 +800,10 @@ class App:
             self.export_frame.status_label.configure(text="Ошибка загрузки списка")
         self._operation_running = False
         messagebox.showerror("Ошибка", err)
+
+    def _handle_connection_status(self, msg):
+        connected = msg.connected if isinstance(msg, ConnectionStatusMsg) else bool(msg[1])
+        self.sidebar.set_connection_status(connected)
 
     def _handle_flood_wait(self, msg):
         if isinstance(msg, FloodWaitMsg):

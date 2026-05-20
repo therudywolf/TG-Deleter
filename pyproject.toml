@@ -32,6 +32,9 @@ dependencies = [
 build = [
     "pyinstaller>=6.0.0",
 ]
+performance = [
+    "TgCrypto>=1.2.5",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

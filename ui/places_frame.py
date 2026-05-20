@@ -336,7 +336,7 @@ class PlacesFrame(ctk.CTkFrame):
             return
         if self.current_section == "groups" and place.type_str not in ("Группа", "Супергруппа"):
             return
-        if self.current_section == "private" and place.type_str != "Личный":
+        if self.current_section == "private" and place.type_str not in ("Личный", "Бот"):
             return
         for widget in self.scroll.winfo_children():
             if not isinstance(widget, ChatCard):
@@ -353,7 +353,7 @@ class PlacesFrame(ctk.CTkFrame):
         elif self.current_section == "groups":
             base = [p for p in self.places if p.type_str in ("Группа", "Супергруппа")]
         elif self.current_section == "private":
-            base = [p for p in self.places if p.type_str == "Личный"]
+            base = [p for p in self.places if p.type_str in ("Личный", "Бот")]
         else:
             base = list(self.places)
         search = (self.search_var.get() or "").strip().lower()

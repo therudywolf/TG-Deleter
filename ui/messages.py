@@ -142,3 +142,8 @@ class ErrorMsg(WorkerMsg):
 class FloodWaitMsg(WorkerMsg):
     seconds: int
     operation: str
+
+
+@dataclass
+class ConnectionStatusMsg(WorkerMsg):
+    connected: bool

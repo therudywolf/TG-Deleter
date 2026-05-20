@@ -258,7 +258,7 @@ def load_api_config() -> dict:
             with open(path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
-                data.update({k: v for k, v in loaded.items() if k in _API_DEFAULTS or k in ("theme", "export_media_types_filter")})
+                data.update({k: v for k, v in loaded.items() if k in _API_DEFAULTS or k == "theme"})
         except Exception as e:
             log.warning("load_api_config failed: %s", e)
     with _config_lock:

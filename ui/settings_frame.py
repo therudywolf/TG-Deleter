@@ -163,10 +163,6 @@ class SettingsFrame(ctk.CTkFrame):
         c["export_include_media"] = self.export_media_var.get()
         c["export_message_limit"] = export_limit
         c["theme"] = self.theme_var.get().lower()
-        c["export_media_types_filter"] = {
-            "photos": True, "videos": True, "documents": True,
-            "audio": True, "stickers": True, "other": True,
-        }
         save_api_config(c)
         self.status_label.configure(text="Настройки сохранены.")
         if self.on_saved:
