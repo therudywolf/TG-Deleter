@@ -62,6 +62,7 @@ from ui.messages import (
 log = logging.getLogger("tg_deleter")
 _PROJECT_ROOT = get_project_root()
 _MAX_LOG_LINES = 1000
+_MAX_MSGS_PER_CYCLE = 200
 
 
 class QueueLogHandler(logging.Handler):
@@ -435,8 +436,10 @@ class App:
                     self._append_log(log_queue.get_nowait())
             except Empty:
                 pass
-            while True:
+            processed = 0
+            while processed < _MAX_MSGS_PER_CYCLE:
                 msg = response_queue.get_nowait()
+                processed += 1
                 if self._closing:
                     break
                 try:

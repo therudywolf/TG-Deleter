@@ -227,7 +227,10 @@ class ExportFrame(ctk.CTkFrame):
 
     def _schedule_filter(self):
         if self._search_job is not None:
-            self.after_cancel(self._search_job)
+            try:
+                self.after_cancel(self._search_job)
+            except Exception:
+                pass
         self._search_job = self.after(300, self._apply_filter)
 
     def _load_dialogs(self):
