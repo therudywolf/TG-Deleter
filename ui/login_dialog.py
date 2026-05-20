@@ -247,6 +247,12 @@ class LoginDialog(ctk.CTkToplevel):
 
     async def _async_send_code(self):
         try:
+            if self._client is not None:
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
+                self._client = None
             self._client = Client(
                 self._session_name,
                 api_id=self._api_id,

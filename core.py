@@ -19,7 +19,7 @@
 """
 Ядро TG Deleter: api_config.json (API и скан), config.json (аккаунты/сессия), Pyrogram-клиент.
 """
-__version__ = "1.1.0"
+__version__ = "0.7.0-beta.1"
 
 import os
 import sys
@@ -281,9 +281,7 @@ def save_api_config(data: dict) -> None:
 def get_api_config() -> dict:
     global _api_config_cache
     with _config_lock:
-        if _api_config_cache is None:
-            pass
-        else:
+        if _api_config_cache is not None:
             return dict(_api_config_cache)
     load_api_config()
     with _config_lock:
@@ -784,6 +782,8 @@ async def delete_message_ids(cid: int, message_ids, pause_event=None, stop_event
                     try:
                         await client.delete_messages(cid, mid)
                         deleted_ids.append(mid)
+                        if not await _sleep_responsive(get_delay_sec(), pause_event, stop_event):
+                            break
                     except FloodWait as e2:
                         await _sleep_responsive(e2.value, pause_event, stop_event)
                     except Exception:
@@ -1104,10 +1104,10 @@ def _message_text(message):
         return str(text)
     media = getattr(message, "media", None)
     if media:
-        return f"[{media}]"
+        return f"[{getattr(media, 'value', media)}]"
     service = getattr(message, "service", None)
     if service:
-        return f"[{service}]"
+        return f"[{getattr(service, 'value', service)}]"
     return ""
 
 
@@ -1436,6 +1436,10 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
                 if not t.done():
                     t.cancel()
             break
+
+    pending = [t for t in tasks if not t.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
     manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
     manifest["total_messages"] = sum(c.get("messages", 0) for c in manifest["chats"])

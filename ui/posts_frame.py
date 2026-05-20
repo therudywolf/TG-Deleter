@@ -43,6 +43,8 @@ from ui.queues import request_queue, scan_paused, scan_stop_requested
 from ui.cache_export import export_messages_to_csv, export_messages_to_json
 from ui.tooltip import bind_tooltip
 
+VISIBLE_LIMIT = 500
+
 
 class PostsFrame(ctk.CTkFrame):
     """Экран 2: Название чата, Назад, список сообщений с чекбоксами, кнопки удаления с подсказками."""
@@ -168,7 +170,7 @@ class PostsFrame(ctk.CTkFrame):
             msg = "В этом чате нет ваших сообщений." if not search else "Поиск не дал результатов."
             ctk.CTkLabel(empty, text=msg, font=font(14), text_color="gray", justify="center").pack(expand=True)
             return
-        for mid, preview, date_str in messages:
+        for mid, preview, date_str in messages[:VISIBLE_LIMIT]:
             row = ctk.CTkFrame(self.scroll, fg_color=ROW_BG, corner_radius=8)
             row.pack(fill="x", pady=2, padx=2)
             var = ctk.BooleanVar(value=False)
@@ -178,6 +180,17 @@ class PostsFrame(ctk.CTkFrame):
             preview = preview or ""
             prev_short = preview[:70] + "…" if len(preview) > 70 else preview
             ctk.CTkLabel(row, text=f"{date_str}  ·  {prev_short}", anchor="w", wraplength=500, font=font(12)).pack(side="left", fill="x", expand=True, padx=PAD_SM, pady=PAD_SM)
+        if len(messages) > VISIBLE_LIMIT:
+            more = ctk.CTkFrame(self.scroll, fg_color="transparent")
+            more.pack(fill="x", pady=PAD_SM)
+            ctk.CTkLabel(
+                more,
+                text=f"Показаны первые {VISIBLE_LIMIT} из {len(messages)}. "
+                     f"Уточните поиск — удаление «всё здесь» и по дате работает со всеми сообщениями.",
+                font=font(12),
+                text_color="gray",
+                justify="center",
+            ).pack(anchor="center")
 
     def _messages_in_date_range(self, show_errors=False):
         """Сообщения текущего чата в заданном периоде (date_from, date_to). Пустые поля = без ограничения."""
