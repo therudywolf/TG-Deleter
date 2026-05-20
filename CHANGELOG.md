@@ -5,7 +5,28 @@ All notable changes to TG Deleter are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] — 2026-05-12
+## [Unreleased]
+
+### Fixed
+- Capped chat message-list rendering to keep the UI responsive on very large histories
+- Login dialog disconnects a stale client before retrying, preventing session-file locks
+- Cancelled export tasks are awaited after Stop, removing pending-task warnings
+- Added an inter-delete delay in the per-message fallback path to reduce cascading FloodWait
+- Bounded the per-cycle GUI event drain so fast scans no longer stall the window
+- Saved appearance theme is now applied on startup, not only within the session
+- Worker reconnect uses exponential backoff (5→60 s) instead of a fixed 5 s retry
+- Sidebar connection indicator clears when the worker loses its session
+- Window geometry is validated against the current screen before being restored
+- Bot chats are now reachable under the "Личка" section filter
+
+### Changed
+- Version scheme aligned to `0.7.0-beta.1` across `VERSION`, `core.py`, and `pyproject.toml`
+- `TgCrypto` offered as an optional `performance` extra for faster Telegram crypto
+
+### Removed
+- Dead `export_media_types_filter` config key and the stale `FINAL_STATUS.txt` artifact
+
+## [0.7.0-beta.1] — 2026-05-12
 
 ### Added
 - Parallel streaming export for selected chats/channels with per-chat message limits
@@ -62,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added comprehensive inline documentation with docstrings
 - Added type hints for better code discoverability
 
-## [1.0.0] — Initial Release
+## [0.1.0] — Initial Release
 
 ### Added
 - Multi-account support with Pyrogram session switching

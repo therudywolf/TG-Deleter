@@ -390,7 +390,7 @@ class ExportFrame(ctk.CTkFrame):
             return False
         if section == "Группы" and place.type_str not in ("Группа", "Супергруппа"):
             return False
-        if section == "Личка" and place.type_str != "Личный":
+        if section == "Личка" and place.type_str not in ("Личный", "Бот"):
             return False
         search = (self.search_var.get() or "").strip().lower()
         return not search or search in (place.title or "").lower()

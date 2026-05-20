@@ -50,7 +50,7 @@ from ui.messages import (
     DeleteBatchProgressMsg, DeleteBatchDoneMsg, DeleteOpStatusMsg,
     ExportProgressMsg, ExportDoneMsg,
     ExportDialogsProgressMsg, ExportDialogsBatchMsg, ExportDialogsDoneMsg,
-    SwitchAccountDoneMsg, LogMsg, ErrorMsg, FloodWaitMsg,
+    SwitchAccountDoneMsg, LogMsg, ErrorMsg, FloodWaitMsg, ConnectionStatusMsg,
 )
 
 try:
@@ -84,6 +84,7 @@ def worker_loop():
             return "handled"
 
         _warned_no_session = None
+        reconnect_delay = 5
         while True:
             session = get_current_session() or (get_accounts_list() or [None])[0]
             if not session:
@@ -116,6 +117,8 @@ def worker_loop():
                 app = create_client(session)
                 async with app:
                     set_app(app)
+                    reconnect_delay = 5
+                    response_queue.put(ConnectionStatusMsg(connected=True))
                     channels_ready = False
 
                     async def ensure_channels_ready():
@@ -325,9 +328,13 @@ def worker_loop():
                                 response_queue.put(ErrorMsg(operation=req[0], error=str(e)))
             except Exception as e:
                 set_app(None)
+                response_queue.put(ConnectionStatusMsg(connected=False))
                 log.exception("worker reconnect loop error for session=%s: %s", session, e)
-                response_queue.put(LogMsg(text=f"Проблема соединения для сессии «{session}». Повтор через 5 сек."))
-                await asyncio.sleep(5)
+                response_queue.put(LogMsg(
+                    text=f"Проблема соединения для сессии «{session}». Повтор через {reconnect_delay} сек."
+                ))
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 60)
 
     asyncio.run(_run())
     log.debug("worker_loop finished")
