@@ -44,6 +44,7 @@ from core import (
 )
 from ui.queues import request_queue, response_queue, log_queue, scan_paused, scan_stop_requested
 from ui.theme import PAD, PAD_SM, SIDEBAR_WIDTH, font, set_theme
+from ui.logging_config import setup_file_logging
 from ui.cache_export import load_places_from_cache, save_places_to_cache, get_cache_mtime_str, clear_cache
 from ui.places_frame import PlacesFrame
 from ui.posts_frame import PostsFrame
@@ -857,5 +858,11 @@ class App:
 
 
 def run_gui():
+    try:
+        log.setLevel(logging.DEBUG)
+        log_path = setup_file_logging(_PROJECT_ROOT)
+        log.debug("file logging enabled: %s", log_path)
+    except Exception:
+        pass
     a = App()
     a.run()
