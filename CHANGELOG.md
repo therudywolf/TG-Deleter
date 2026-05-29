@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Persistent rotating file logging (`tg_deleter.log`, 5 MB × 3) wired up at GUI
+  startup — previously the rotating handler existed but was never enabled, so the
+  windowed `.exe` produced no diagnostics
+- Continuous-integration workflow running the test suite on Python 3.10 and 3.13
+- Unit tests for chat-type classification (incl. bots), media-export gating, and
+  enum rendering in exported text (64 tests total)
+
 ### Fixed
 - Capped chat message-list rendering to keep the UI responsive on very large histories
 - Login dialog disconnects a stale client before retrying, preventing session-file locks
@@ -25,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - Dead `export_media_types_filter` config key and the stale `FINAL_STATUS.txt` artifact
+- Unused `ui/navigator.py` module (navigation is handled directly in `ui/app.py`)
 
 ## [0.7.0-beta.1] — 2026-05-12
 

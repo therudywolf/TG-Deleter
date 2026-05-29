@@ -203,6 +203,54 @@ class TestChatTypeStr:
             type = ChatType.SUPERGROUP
         assert _chat_type_str(FakeChat()) == "Супергруппа"
 
+    def test_bot(self):
+        from core import _chat_type_str
+        from pyrogram.enums import ChatType
+
+        class FakeChat:
+            type = ChatType.BOT
+        assert _chat_type_str(FakeChat()) == "Бот"
+
+
+class TestChatTypeClassifiers:
+    """Tests for the scan/export section filters."""
+
+    def test_bot_counts_as_private(self):
+        from core import _is_private_chat_type, _is_group_chat_type, _is_channel_chat_type
+        from pyrogram.enums import ChatType
+
+        class FakeChat:
+            type = ChatType.BOT
+        assert _is_private_chat_type(FakeChat()) is True
+        assert _is_group_chat_type(FakeChat()) is False
+        assert _is_channel_chat_type(FakeChat()) is False
+
+    def test_private_is_private(self):
+        from core import _is_private_chat_type
+        from pyrogram.enums import ChatType
+
+        class FakeChat:
+            type = ChatType.PRIVATE
+        assert _is_private_chat_type(FakeChat()) is True
+
+    def test_supergroup_is_group(self):
+        from core import _is_group_chat_type, _is_private_chat_type
+        from pyrogram.enums import ChatType
+
+        class FakeChat:
+            type = ChatType.SUPERGROUP
+        assert _is_group_chat_type(FakeChat()) is True
+        assert _is_private_chat_type(FakeChat()) is False
+
+    def test_channel_is_channel(self):
+        from core import _is_channel_chat_type, _is_group_chat_type
+        from pyrogram.enums import ChatType
+
+        class FakeChat:
+            type = ChatType.CHANNEL
+        assert _is_channel_chat_type(FakeChat()) is True
+        assert _is_group_chat_type(FakeChat()) is False
+
 
 class TestIntFloat:
     """Tests for _int and _float helpers."""
@@ -277,6 +325,36 @@ class TestMessageMediaKind:
             media = True
         assert _message_media_kind(FakeMsg()) == "videos"
 
+    def test_audio(self):
+        from core import _message_media_kind
+
+        class FakeMsg:
+            photo = None
+            video = None
+            video_note = None
+            document = None
+            audio = None
+            voice = True
+            sticker = None
+            animation = None
+            media = True
+        assert _message_media_kind(FakeMsg()) == "audio"
+
+    def test_sticker(self):
+        from core import _message_media_kind
+
+        class FakeMsg:
+            photo = None
+            video = None
+            video_note = None
+            document = None
+            audio = None
+            voice = None
+            sticker = True
+            animation = None
+            media = True
+        assert _message_media_kind(FakeMsg()) == "stickers"
+
     def test_no_media(self):
         from core import _message_media_kind
 
@@ -291,6 +369,44 @@ class TestMessageMediaKind:
             animation = None
             media = None
         assert _message_media_kind(FakeMsg()) is None
+
+
+class TestShouldExportMedia:
+    """Tests for _should_export_media gating."""
+
+    class _PhotoMsg:
+        photo = True
+        video = None
+        video_note = None
+        document = None
+        audio = None
+        voice = None
+        sticker = None
+        animation = None
+        media = True
+
+    class _PlainMsg:
+        photo = None
+        video = None
+        video_note = None
+        document = None
+        audio = None
+        voice = None
+        sticker = None
+        animation = None
+        media = None
+
+    def test_enabled_type(self):
+        from core import _should_export_media, _normalize_media_types
+        assert _should_export_media(self._PhotoMsg(), _normalize_media_types({"photos": True})) is True
+
+    def test_disabled_type(self):
+        from core import _should_export_media, _normalize_media_types
+        assert _should_export_media(self._PhotoMsg(), _normalize_media_types({"photos": False})) is False
+
+    def test_non_media_message(self):
+        from core import _should_export_media, _normalize_media_types
+        assert _should_export_media(self._PlainMsg(), _normalize_media_types(None)) is False
 
 
 class TestNormalizeMediaTypes:
@@ -446,6 +562,23 @@ class TestMessageText:
             media = None
             service = None
         assert _message_text(FakeMsg()) == ""
+
+    def test_media_renders_enum_value(self):
+        from core import _message_text
+
+        class FakeEnum:
+            value = "photo"
+
+            def __str__(self):
+                return "MessageMediaType.PHOTO"
+
+        class FakeMsg:
+            text = None
+            caption = None
+            media = FakeEnum()
+            service = None
+        # Should use the enum's .value, not its repr/str.
+        assert _message_text(FakeMsg()) == "[photo]"
 
 
 class TestSessionNames:
