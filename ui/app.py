@@ -22,6 +22,7 @@
 import json
 import os
 import re
+import sys
 import logging
 import threading
 from queue import Empty
@@ -52,6 +53,7 @@ from ui.export_frame import ExportFrame
 from ui.sidebar_frame import SidebarFrame
 from ui.settings_frame import SettingsFrame
 from ui.worker import worker_loop
+from ui.tray import TrayIcon
 from ui.messages import (
     WorkerMsg, LogMsg, MeMsg, SwitchAccountDoneMsg,
     ScanProgressMsg, ScanPlaceMsg, ScanDoneMsg,
@@ -66,6 +68,12 @@ log = logging.getLogger("tg_deleter")
 _PROJECT_ROOT = get_project_root()
 _MAX_LOG_LINES = 1000
 _MAX_MSGS_PER_CYCLE = 200
+
+
+def resource_path(*parts: str) -> str:
+    """Absolute path to a bundled resource, working both from source and a frozen .exe."""
+    base = getattr(sys, "_MEIPASS", None) or _PROJECT_ROOT
+    return os.path.join(base, *parts)
 
 
 class QueueLogHandler(logging.Handler):
@@ -87,6 +95,7 @@ class App:
         self.root.title("TG Deleter — удаление своих сообщений")
         self.root.minsize(720, 500)
         self.root.configure(fg_color=("gray95", "#121212"))
+        self._set_window_icon()
 
         self.me = None
         self.places: list = []
@@ -95,6 +104,15 @@ class App:
         self._closing = False
         self._operation_running = False
         self._pending_switch_session = None
+        self._tray_hint_shown = False
+
+        # System-tray icon for background mode (closing the window hides it here).
+        self._tray = TrayIcon(
+            resource_path("assets", "icon.png"),
+            on_show=lambda: self.root.after(0, self._show_window),
+            on_quit=lambda: self.root.after(0, self._quit_app),
+            title="TG Deleter",
+        )
 
         self._load_window_geometry()
 
@@ -104,7 +122,7 @@ class App:
         self.sidebar = SidebarFrame(
             main,
             width=SIDEBAR_WIDTH,
-            on_quit=self._on_close,
+            on_quit=self._quit_app,
             on_switch_account=self._on_switch_account,
             on_show_chats=self._show_places,
             on_show_export=self._show_export,
@@ -372,7 +390,7 @@ class App:
             if others:
                 request_queue.put(("switch_account", others[0]))
                 return
-        self._on_close()
+        self._quit_app()
 
     def _refresh_cache(self):
         session = get_current_session()
@@ -836,24 +854,82 @@ class App:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _set_window_icon(self):
+        """Set the taskbar / title-bar icon (best-effort, cross-platform)."""
+        ico = resource_path("assets", "icon.ico")
+        png = resource_path("assets", "icon.png")
+        try:
+            if os.path.isfile(ico):
+                self.root.iconbitmap(ico)
+                return
+        except Exception:
+            pass
+        try:
+            if os.path.isfile(png):
+                import tkinter as tk
+                self._icon_image = tk.PhotoImage(file=png)
+                self.root.iconphoto(True, self._icon_image)
+        except Exception:
+            pass
+
     def run(self):
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
+        if self._tray.available:
+            self._tray.start()
         self.root.mainloop()
 
-    def _on_close(self):
+    def _on_window_close(self):
+        """X button: hide to the system tray and keep running in the background."""
+        if self._closing:
+            return
+        if self._tray.available:
+            self._save_window_geometry()
+            self.root.withdraw()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self._tray.notify(
+                    "Приложение свёрнуто в трей и продолжает работать в фоне. "
+                    "«Открыть» — вернуть окно, «Выход» — закрыть полностью.",
+                    "TG Deleter",
+                )
+            log.debug("window minimized to tray")
+            return
+        # No tray available — fall back to a full quit.
+        self._quit_app()
+
+    def _show_window(self):
+        """Restore the window from the tray."""
+        if self._closing:
+            return
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except Exception as e:
+            log.debug("show_window failed: %s", e)
+
+    def _quit_app(self):
         if self._closing:
             return
         self._closing = True
         log.removeHandler(self._log_handler)
         scan_stop_requested.set()
         scan_paused.clear()
-        self._save_window_geometry()
+        try:
+            self._save_window_geometry()
+        except Exception:
+            pass
         request_queue.put(("quit",))
+        try:
+            self.root.deiconify()
+        except Exception:
+            pass
         self.root.title("TG Deleter — закрываюсь…")
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=5.0)
             if self._worker_thread.is_alive():
                 log.warning("Worker thread did not stop in time")
+        self._tray.stop()
         self.root.destroy()
 
 

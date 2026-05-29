@@ -2,6 +2,7 @@ pyrogram>=2.0.0
 customtkinter>=5.2.0
 python-dotenv>=1.0.0
 Pillow>=10.0.0
+pystray>=0.19.0
 
 # Optional: much faster Telegram crypto. Installs as a prebuilt wheel on most
 # platforms; needs a C/C++ toolchain only where no wheel is available.

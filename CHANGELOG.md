@@ -5,9 +5,16 @@ All notable changes to TG Deleter are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0-beta.1] — 2026-05-29
 
 ### Added
+- **Background mode**: closing the window now minimizes TG Deleter to the system
+  tray (pystray) and keeps the worker connected; restore or quit from the tray
+  menu, or quit fully from the sidebar
+- Branded app icon (`assets/`) embedded in the window, taskbar, and `.exe`, with a
+  reproducible generator (`assets/make_icon.py`)
+- Auto-builder: `build.ps1` bootstraps a venv, installs dependencies + PyInstaller,
+  and produces a single windowed `TGDeleter.exe` with the icon and tray bundled
 - Persistent rotating file logging (`tg_deleter.log`, 5 MB × 3) wired up at GUI
   startup — previously the rotating handler existed but was never enabled, so the
   windowed `.exe` produced no diagnostics
@@ -28,12 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bot chats are now reachable under the "Личка" section filter
 
 ### Changed
-- Version scheme aligned to `0.7.0-beta.1` across `VERSION`, `core.py`, and `pyproject.toml`
+- Version aligned to `0.8.0-beta.1` across `VERSION`, `core.py`, `ui/__init__.py`, and `pyproject.toml`
+- README rewritten in the active RudyWolf project style; added `pystray` runtime dependency
 - `TgCrypto` offered as an optional `performance` extra for faster Telegram crypto
 
 ### Removed
 - Dead `export_media_types_filter` config key and the stale `FINAL_STATUS.txt` artifact
 - Unused `ui/navigator.py` module (navigation is handled directly in `ui/app.py`)
+- Stray debug output dumps (`cli_*.txt`, `gui_*.txt`) from the working tree
 
 ## [0.7.0-beta.1] — 2026-05-12
 
