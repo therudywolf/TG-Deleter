@@ -322,7 +322,7 @@ class TestModes:
     def test_add_mode_button_order_puts_primary_last(self, frame):
         frame.mode_switch.set(MODE_ADD)
         frame._on_mode_change(MODE_ADD)
-        packed = [w for w in frame.actions.pack_slaves()]
+        packed = list(frame.actions.pack_slaves())
         assert frame.find_chats_btn not in packed and frame.remove_btn not in packed
         assert frame.load_chats_btn in packed and frame.add_btn in packed
 

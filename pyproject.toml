@@ -39,6 +39,7 @@ performance = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -60,3 +61,17 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Ловим настоящие поломки: мёртвые импорты, неиспользуемые имена, ошибки в except.
+# Стилистику (длина строк, %-форматирование, аргументы Tk-колбэков) не трогаем —
+# кодовая база писалась в своём стиле, и шум перекрыл бы полезное.
+select = ["F", "E9", "B", "C4", "PIE", "RET501", "RET502", "SIM101", "SIM110"]
+ignore = ["B023", "B008", "B904"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "F811"]

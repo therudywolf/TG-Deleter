@@ -17,14 +17,13 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """Typed messages for worker <-> GUI communication."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
 @dataclass
 class WorkerMsg:
     """Base class for all worker->GUI messages."""
-    pass
 
 
 @dataclass

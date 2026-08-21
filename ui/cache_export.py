@@ -26,7 +26,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from core import Place, get_current_session, get_cache_session_key, get_project_root, normalize_session_name
+from core import Place, get_cache_session_key, get_project_root, normalize_session_name
 
 log = logging.getLogger("tg_deleter")
 

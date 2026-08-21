@@ -79,7 +79,6 @@ class AppState:
         self.username: str | None = None
         self.first_name: str | None = None
         self.last_name: str | None = None
-        self.channel_ids: set[int] = set()
         self.client: Client | None = None
 
     def set_me(self, me_dict: dict | None) -> None:
@@ -96,12 +95,7 @@ class AppState:
             self.username = None
             self.first_name = None
             self.last_name = None
-            self.channel_ids = set()
             self.client = None
-
-    def set_channels(self, ids: set[int]) -> None:
-        with self._lock:
-            self.channel_ids = set(ids)
 
     def set_client(self, client: Client | None) -> None:
         with self._lock:
@@ -410,25 +404,6 @@ def set_config_value(key: str, value) -> None:
 def reset_config() -> None:
     save_config(dict(_APP_DEFAULTS))
 
-def set_my_channels(channel_ids: set[int]) -> None:
-    """Сохранить ID каналов, где пользователь является admin/creator."""
-    state.set_channels(channel_ids)
-    log.debug("set_my_channels: %d каналов", len(channel_ids))
-
-
-async def fetch_and_set_my_channels(client: Client) -> None:
-    """Обходит диалоги один раз и собирает ID каналов где пользователь — admin или creator."""
-    ids: set[int] = set()
-    try:
-        async for dialog in client.get_dialogs():
-            chat = dialog.chat
-            if getattr(chat, "type", None) == ChatType.CHANNEL:
-                if getattr(chat, "creator", False) or getattr(chat, "admin_rights", None) is not None:
-                    ids.add(chat.id)
-    except Exception as e:
-        log.warning("fetch_and_set_my_channels failed: %s", e)
-    set_my_channels(ids)
-
 def _accounts_profiles_path():
     """Путь к файлу с профилями аккаунтов (display_name, username, avatar_path)."""
     return os.path.join(get_project_root(), "accounts_profiles.json")
@@ -679,13 +654,13 @@ def _chat_type_key(chat) -> str:
 def _is_private_chat_type(chat) -> bool:
     t = getattr(chat, "type", None)
     key = _chat_type_key(chat)
-    return t in (ChatType.PRIVATE, ChatType.BOT) or key in ("private", "bot") or key.endswith(".private") or key.endswith(".bot")
+    return t in (ChatType.PRIVATE, ChatType.BOT) or key in ("private", "bot") or key.endswith((".private", ".bot"))
 
 
 def _is_group_chat_type(chat) -> bool:
     t = getattr(chat, "type", None)
     key = _chat_type_key(chat)
-    return t in (ChatType.GROUP, ChatType.SUPERGROUP) or key in ("group", "supergroup", "megagroup") or key.endswith(".group") or key.endswith(".supergroup")
+    return t in (ChatType.GROUP, ChatType.SUPERGROUP) or key in ("group", "supergroup", "megagroup") or key.endswith((".group", ".supergroup"))
 
 
 def _is_channel_chat_type(chat) -> bool:
@@ -1307,7 +1282,7 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
 
     progress_state = {
         "done_chats": 0,
-        "chat_done": {cid: 0 for cid in chat_ids},
+        "chat_done": dict.fromkeys(chat_ids, 0),
         "chat_total": dict(counts_by_chat),
     }
 

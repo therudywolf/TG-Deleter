@@ -56,16 +56,12 @@ from ui.settings_frame import SettingsFrame
 from ui.worker import worker_loop
 from ui.tray import TrayIcon
 from ui.messages import (
-    WorkerMsg, LogMsg, MeMsg, SwitchAccountDoneMsg,
+    LogMsg, MeMsg, SwitchAccountDoneMsg,
     ScanProgressMsg, ScanPlaceMsg, ScanDoneMsg,
     DeleteOpStatusMsg, DeleteDoneMsg, DeleteAllExceptDoneMsg,
     DeleteAllNoScanDoneMsg, DeleteBatchProgressMsg, DeleteBatchDoneMsg,
     ExportProgressMsg, ExportDoneMsg,
     ExportDialogsProgressMsg, ExportDialogsBatchMsg, ExportDialogsDoneMsg,
-    UserResolvedMsg, MemberChatsProgressMsg, MemberChatFoundMsg, MemberChatsDoneMsg,
-    MemberDialogsProgressMsg, MemberDialogsBatchMsg, MemberDialogsDoneMsg,
-    MemberActionProgressMsg, MemberActionDoneMsg,
-    AdminsProgressMsg, AdminFoundMsg, AdminsDoneMsg,
     ErrorMsg, FloodWaitMsg, ConnectionStatusMsg,
 )
 
@@ -771,9 +767,9 @@ class App:
 
     def _handle_delete_batch_progress(self, msg):
         if isinstance(msg, DeleteBatchProgressMsg):
-            i, total, cid = msg.current, msg.total, msg.chat_id
+            i, total = msg.current, msg.total
         else:
-            i, total, cid = msg[1], msg[2], msg[3]
+            i, total = msg[1], msg[2]
         self.places_frame.status_label.configure(text="Удаление в чатах: %s из %s…" % (i, total))
 
     def _handle_delete_batch_done(self, msg):

@@ -40,7 +40,6 @@ from core import (
     normalize_session_name,
     set_app,
     set_me_from_dict,
-    fetch_and_set_my_channels,
     add_account,
     get_chat_id_cli,
     get_api_id,
@@ -194,10 +193,6 @@ async def _cli_run(app):
             set_me_from_dict(me_dict)
         except Exception as e:
             log.warning("CLI get_me failed: %s", e)
-        try:
-            await fetch_and_set_my_channels(app)
-        except Exception as e:
-            log.warning("CLI fetch_and_set_my_channels failed: %s", e)
         chat_title = None
         try:
             cid = get_chat_id_cli()

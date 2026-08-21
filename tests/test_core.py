@@ -17,9 +17,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """Unit tests for core.py pure functions."""
-import json
 import os
-import tempfile
 import pytest
 
 import sys
@@ -486,8 +484,6 @@ class TestConfigHelpers:
     """Tests for config load/save."""
 
     def test_api_config_roundtrip(self):
-        from core import save_api_config, load_api_config, _api_config_path, _API_DEFAULTS
-        import tempfile
         pass
 
     def test_place_dataclass(self):
@@ -617,9 +613,10 @@ class TestOwnershipSafety:
 
     @pytest.mark.asyncio
     async def test_sender_chat_is_not_ownership(self):
-        from core import check_if_mine, set_my_channels
+        # Сообщение от имени канала не наше, даже если канал наш.
+        from core import check_if_mine, set_me_from_dict
 
-        set_my_channels({123})
+        set_me_from_dict({"id": 1, "username": "alice"})
 
         class FakeSenderChat:
             id = 123
@@ -1186,7 +1183,6 @@ class TestFindChatsProgress:
     @pytest.mark.asyncio
     async def test_deep_scan_also_announces_itself(self, no_member_delays):
         from core import find_chats_with_user, set_app, set_me_from_dict
-        from pyrogram.enums import ChatType
 
         set_me_from_dict({"id": 1, "username": "me"})
 

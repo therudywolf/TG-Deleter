@@ -36,7 +36,10 @@ jobs:
           # pytest-asyncio drives the async ownership-safety tests;
           # customtkinter + Pillow are needed by the GUI tests, which skip
           # themselves if Tk cannot open a display.
-          pip install pyrogram pytest pytest-asyncio customtkinter Pillow
+          pip install pyrogram pytest pytest-asyncio customtkinter Pillow ruff
+
+      - name: Lint
+        run: ruff check .
 
       - name: Run tests
         run: xvfb-run -a pytest -q
