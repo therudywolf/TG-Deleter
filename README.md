@@ -18,7 +18,7 @@ Licensed under AGPL-3.0-only.
 - **Multi-account** — switch between Pyrogram sessions on the fly; per-account avatar, profile, and scan cache.
 - **Smart scan** — find only *your* messages across groups, channels, and private chats, with depth limits to keep the API happy.
 - **Safe deletion** — ownership is re-checked right before every delete; batched up to 100 messages per request. Delete by message, by chat, "everything except this one", or skip-scan for huge histories.
-- **Member management** — remove a person from every chat where you have the rights, or add them to the chats you tick. Find them by `@username`, ID, phone, or `t.me` link.
+- **Member management** — remove a person from every chat where you have the rights, or add them to the chats you tick. Find them by `@username`, ID, phone, or `t.me` link. Where your rights fall short, the app finds the admins who *can* remove them and links straight to their DMs.
 - **Streaming export** — back up selected chats to `messages.jsonl` + `messages.html` + optional `media/`, with a `manifest.json` summary. Large chats never need to fit in memory.
 - **Background mode** — close the window and TG Deleter keeps running in the **system tray**; reopen or quit from the tray menu. 🐺
 - **Live control** — pause / stop any scan, delete, or export; FloodWait countdowns surface in the status bar.
@@ -82,6 +82,14 @@ unticked — you can still tick them by hand to let Telegram have the final word
 **Забанить, чтобы не вернулся** is on by default; untick it to kick without a ban,
 so the person can rejoin via an invite link.
 
+**Кто может удалить.** Rights you do not have are not a dead end. Press
+**Кто может удалить** and the app walks the chats you cannot act in, collects
+their administrators (Telegram shows admin lists to plain members too), and
+reports *people* rather than chats — one admin typically covers dozens of them.
+Every row opens a private chat with that person in one click, and
+**Копировать список** puts the whole thing on the clipboard as text you can
+paste straight into a message.
+
 **Добавить в чаты.** Click **Загрузить чаты** for all your groups, supergroups, and
 channels, filter or search by title, tick the ones you want, and press **Добавить в
 выбранные**.
@@ -142,6 +150,7 @@ ui/                CustomTkinter GUI
   worker.py        Background asyncio + Pyrogram thread
   tray.py          System-tray icon (pystray)
   *_frame.py       Screens: chats, posts, export, members, settings, sidebar
+  admins_dialog.py Who-can-remove window with one-click links to their DMs
 assets/            App icon + generator (make_icon.py)
 tests/             pytest suite: core logic + GUI (conftest.py isolates the data dir)
 ```

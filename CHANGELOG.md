@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labelled with the reason and left unchecked
 - **Add to selected chats**: loads all your groups, supergroups, and channels with
   checkboxes and title search, then invites the person into everything you tick
+- **«Кто может удалить»**: for the chats where your own rights fall short, the
+  app collects those chats' administrators — Telegram shows admin lists to plain
+  members too — and reports *people*, not chats: one admin usually covers dozens
+  of chats. Each row opens a private chat with that person in one click, and the
+  whole list copies to the clipboard as text ready to paste into a message
 - Per-chat result reporting for both operations: successes and Telegram's refusal
   reasons (privacy settings, missing rights, member limits) in plain Russian,
   mirrored into the log panel
@@ -24,10 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching the scan and export screens
 - Tooltips on the search-scope selector, the ban checkbox, and every chat row
   (the row tip spells out both sides' status)
-- 124 new tests: core coverage for user-query parsing, error descriptions, rights
+- 167 new tests: core coverage for user-query parsing, error descriptions, rights
   detection, ban vs. kick semantics and per-chat failure isolation, plus the
   project's first GUI tests — the Участники screen and the main window's worker
-  message dispatch (190 tests total, up from 66)
+  message dispatch (233 tests total, up from 66)
 - `tests/conftest.py` redirects `core.get_project_root` to a temporary directory
   for the whole run, so tests can no longer drop `api_config.json` or caches into
   the working tree, and hosts the single shared Tk window the GUI tests reuse

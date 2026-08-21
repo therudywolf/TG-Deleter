@@ -54,6 +54,7 @@ class Recorder:
         self.load = []
         self.remove = []
         self.add = []
+        self.admins = []
 
 
 def make_chat(chat_id, title, type_str="Супергруппа", my="owner", target="member", can_manage=True):
@@ -86,6 +87,7 @@ def frame(gui_root, monkeypatch):
         on_load_chats=lambda *a: rec.load.append(a),
         on_remove=lambda *a: rec.remove.append(a),
         on_add=lambda *a: rec.add.append(a),
+        on_find_admins=lambda *a: rec.admins.append(a),
     )
     f.pack(fill="both", expand=True)
     gui_root.update()
@@ -502,3 +504,72 @@ class TestReset:
         assert frame._selected == {MODE_REMOVE: set(), MODE_ADD: set()}
         assert frame._rendered_count() == 0
         assert frame.find_chats_btn.cget("state") == "disabled"
+
+
+class TestAdminLookup:
+    """Кнопка «Кто может удалить» и её данные."""
+
+    def _fill(self, frame):
+        frame.set_user(TARGET)
+        frame.finish_find_chats([
+            make_chat(-1001, "Мой чат"),
+            make_chat(-1002, "Чужой чат", my="member", can_manage=False),
+            make_chat(-1003, "Ещё чужой", my="member", can_manage=False),
+        ], stopped=False)
+        frame.update()
+
+    def test_button_is_off_until_there_is_something_to_ask_about(self, frame):
+        frame.set_user(TARGET)
+        assert frame.admins_btn.cget("state") == "disabled"
+        frame.finish_find_chats([make_chat(-1001, "Мой чат")], stopped=False)
+        frame.update()
+        # всё под нашим контролем — просить некого
+        assert frame.admins_btn.cget("state") == "disabled"
+
+    def test_button_turns_on_when_rights_are_missing(self, frame):
+        self._fill(frame)
+        assert frame.admins_btn.cget("state") == "normal"
+
+    def test_only_chats_without_rights_are_sent(self, frame):
+        self._fill(frame)
+        frame._find_admins()
+        assert frame.rec.admins == [([(-1002, "Чужой чат"), (-1003, "Ещё чужой")], 777)]
+
+    def test_nothing_to_ask_shows_a_hint(self, frame):
+        frame.set_user(TARGET)
+        frame._find_admins()
+        assert frame.rec.admins == []
+        assert frame.box.kinds() == ["info"]
+
+    def test_busy_screen_ignores_the_button(self, frame):
+        self._fill(frame)
+        frame.set_busy(True)
+        frame._find_admins()
+        assert frame.rec.admins == []
+        frame.set_busy(False)
+
+    def test_progress_text(self, frame):
+        frame.update_admins_progress(3, 40, "ДИТ. WAF - КППМ")
+        assert "3/40" in frame.status_label.cget("text")
+
+    def test_finish_opens_the_dialog_and_frees_the_screen(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        opened = {}
+
+        class FakeDialog:
+            def __init__(self, parent, admins, target_name="", chats_count=0, stopped=False):
+                opened.update(admins=admins, target_name=target_name,
+                              chats_count=chats_count, stopped=stopped)
+
+        monkeypatch.setattr(members_frame, "AdminsDialog", FakeDialog)
+        self._fill(frame)
+        frame._find_admins()
+        admins = [object(), object()]
+        frame.finish_admins(admins, stopped=False)
+        frame.update()
+        assert opened["admins"] is admins
+        assert opened["target_name"] == TARGET.display_name
+        assert opened["chats_count"] == 2
+        assert frame._busy is False
+        assert "2" in frame.status_label.cget("text")

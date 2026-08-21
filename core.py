@@ -38,7 +38,7 @@ from types import MappingProxyType
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait
-from pyrogram.enums import ChatType
+from pyrogram.enums import ChatType, ChatMembersFilter
 
 log = logging.getLogger("tg_deleter")
 
@@ -2084,3 +2084,155 @@ async def add_user_to_chats(
             break
     log.debug("add_user_to_chats done: обработано %s из %s", len(results), total)
     return results
+
+
+@dataclass
+class AdminContact:
+    """Администратор, к которому можно обратиться, и чаты, где он поможет."""
+    user_id: int
+    first_name: str = ""
+    last_name: str = ""
+    username: str | None = None
+    is_bot: bool = False
+    is_deleted: bool = False
+    owner_of: int = 0                            # в скольких чатах он владелец
+    chats: list = field(default_factory=list)    # [(chat_id, title), ...]
+
+    @property
+    def display_name(self) -> str:
+        name = f"{self.first_name} {self.last_name}".strip()
+        if name:
+            return name
+        if self.username:
+            return f"@{self.username}"
+        return str(self.user_id)
+
+    @property
+    def link(self) -> str:
+        """Ссылка на личку. Без username остаётся внутренняя схема Telegram."""
+        if self.username:
+            return "https://t.me/%s" % self.username
+        return "tg://user?id=%s" % self.user_id
+
+    @property
+    def role(self) -> str:
+        if self.owner_of and self.owner_of == len(self.chats):
+            return "владелец"
+        if self.owner_of:
+            return "владелец/админ"
+        return "админ"
+
+
+def _admin_can_restrict(member, basic_group: bool = False) -> bool:
+    """Может ли этот администратор удалять участников."""
+    return _can_restrict_members(member, basic_group)
+
+
+async def find_chat_admins(
+    chats,
+    target_user_id: int | None = None,
+    pause_event=None,
+    stop_event=None,
+    progress_callback=None,
+    status_callback=None,
+    flood_callback=None,
+) -> list[AdminContact]:
+    """
+    Собрать администраторов указанных чатов, которые могут удалять участников.
+
+    Списки админов видны и рядовому участнику, так что работает даже там, где
+    прав у нас нет — ради этого всё и затевается.
+    Возвращает людей, а не чаты: один админ обычно закрывает сразу десятки чатов.
+    progress_callback(AdminContact) — при появлении нового человека в списке.
+    status_callback(n, total, title) — прогресс обхода.
+    """
+    client = get_app()
+    if not client:
+        raise RuntimeError("Нет подключения к Telegram.")
+    targets = _action_targets(chats)
+    if not targets:
+        raise ValueError("Не выбраны чаты.")
+
+    my_id = state.get_user_id()
+    skip_ids = {int(my_id)} if my_id is not None else set()
+    if target_user_id is not None:
+        skip_ids.add(int(target_user_id))
+
+    by_user: dict[int, AdminContact] = {}
+    delay = max(get_delay_sec(), _MEMBER_PROBE_DELAY_MIN)
+    total = len(targets)
+    log.debug("find_chat_admins: чатов %s", total)
+
+    def emit_status(n, title):
+        if status_callback:
+            try:
+                status_callback(n, total, title)
+            except Exception:
+                pass
+
+    async def collect(chat_id):
+        found = []
+        async for member in client.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS):
+            found.append(member)
+        return found
+
+    try:
+        for i, (cid, title) in enumerate(targets, 1):
+            if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                break
+            emit_status(i, title)
+            basic_group = _peer_kind(cid) == "chat"
+            try:
+                members = await _call_with_floodwait(
+                    lambda: collect(cid), pause_event, stop_event, flood_callback=flood_callback,
+                )
+            except _OperationStopped:
+                raise
+            except Exception as e:
+                log.debug("Админы чата %s недоступны: %s", cid, e)
+                if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+                    break
+                continue
+            for member in members:
+                status = _member_status_key(member)
+                if status not in ("owner", "administrator"):
+                    # В обычных группах фильтр по админам игнорируется, приходит весь состав.
+                    continue
+                if not _admin_can_restrict(member, basic_group):
+                    continue
+                user = getattr(member, "user", None)
+                uid = getattr(user, "id", None)
+                if uid is None or int(uid) in skip_ids:
+                    continue
+                uid = int(uid)
+                contact = by_user.get(uid)
+                if contact is None:
+                    contact = AdminContact(
+                        user_id=uid,
+                        first_name=(getattr(user, "first_name", None) or "").strip(),
+                        last_name=(getattr(user, "last_name", None) or "").strip(),
+                        username=(getattr(user, "username", None) or "").strip() or None,
+                        is_bot=bool(getattr(user, "is_bot", False)),
+                        is_deleted=bool(getattr(user, "is_deleted", False)),
+                    )
+                    by_user[uid] = contact
+                    if progress_callback:
+                        try:
+                            progress_callback(contact)
+                        except Exception:
+                            pass
+                if not any(c[0] == cid for c in contact.chats):
+                    contact.chats.append((cid, title))
+                if status == "owner":
+                    contact.owner_of += 1
+            if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+                break
+    except _OperationStopped:
+        log.debug("find_chat_admins: остановлено пользователем")
+
+    admins = sorted(
+        by_user.values(),
+        key=lambda a: (-len(a.chats), a.is_bot, -a.owner_of, a.display_name.lower()),
+    )
+    log.debug("find_chat_admins done: людей %s", len(admins))
+    return admins

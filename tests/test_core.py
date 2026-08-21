@@ -1416,3 +1416,266 @@ class TestKickUsesTheRightPeerKind:
 
         assert client.unbanned == []
         assert results[0].ok is True and results[0].note == "Удалён"
+
+
+class FakeAdminUser:
+    def __init__(self, uid, first="", last="", username=None, is_bot=False):
+        self.id = uid
+        self.first_name = first
+        self.last_name = last
+        self.username = username
+        self.is_bot = is_bot
+        self.is_deleted = False
+
+
+def admin_member(uid, status="ADMINISTRATOR", can_restrict=True, username=None,
+                 first="Имя", last="", is_bot=False, privileges_missing=False):
+    member = FakeChatMember(status, can_restrict=can_restrict)
+    if privileges_missing:
+        member.privileges = None
+    member.user = FakeAdminUser(uid, first, last, username, is_bot)
+    return member
+
+
+class FakeAdminClient:
+    """Отдаёт заранее заданный состав админов по каждому чату."""
+
+    def __init__(self, per_chat, broken=()):
+        self.per_chat = per_chat
+        self.broken = set(broken)
+        self.asked = []
+
+    def get_chat_members(self, chat_id, filter=None):
+        self.asked.append(chat_id)
+        broken = chat_id in self.broken
+        members = list(self.per_chat.get(chat_id, []))
+
+        async def gen():
+            if broken:
+                raise ChatAdminRequired("[400 CHAT_ADMIN_REQUIRED]")
+            for m in members:
+                yield m
+
+        return gen()
+
+
+class TestAdminContact:
+    """Tests for AdminContact."""
+
+    def test_display_name_prefers_the_real_name(self):
+        from core import AdminContact
+        a = AdminContact(user_id=1, first_name="Наталья", last_name="Шипова", username="NDShe")
+        assert a.display_name == "Наталья Шипова"
+
+    def test_display_name_falls_back_to_username_then_id(self):
+        from core import AdminContact
+        assert AdminContact(user_id=1, username="ndshe").display_name == "@ndshe"
+        assert AdminContact(user_id=7).display_name == "7"
+
+    def test_link_uses_the_public_username(self):
+        from core import AdminContact
+        assert AdminContact(user_id=1, username="NDShe").link == "https://t.me/NDShe"
+
+    def test_link_falls_back_to_the_internal_scheme(self):
+        from core import AdminContact
+        assert AdminContact(user_id=603708602).link == "tg://user?id=603708602"
+
+    def test_role_reflects_ownership(self):
+        from core import AdminContact
+        plain = AdminContact(user_id=1)
+        plain.chats = [(-1, "a"), (-2, "b")]
+        assert plain.role == "админ"
+        mixed = AdminContact(user_id=1, owner_of=1)
+        mixed.chats = [(-1, "a"), (-2, "b")]
+        assert mixed.role == "владелец/админ"
+        full = AdminContact(user_id=1, owner_of=2)
+        full.chats = [(-1, "a"), (-2, "b")]
+        assert full.role == "владелец"
+
+
+class TestFindChatAdmins:
+    """Tests for find_chat_admins."""
+
+    SUPER_A = -1001111111111
+    SUPER_B = -1002222222222
+    BASIC = -4614472266
+
+    @pytest.mark.asyncio
+    async def test_one_admin_across_several_chats_is_one_contact(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        boss = lambda: admin_member(100, username="boss", first="Босс")
+        client = FakeAdminClient({self.SUPER_A: [boss()], self.SUPER_B: [boss()]})
+        set_app(client)
+        try:
+            admins = await find_chat_admins([(self.SUPER_A, "Первый"), (self.SUPER_B, "Второй")])
+        finally:
+            set_app(None)
+
+        assert len(admins) == 1
+        assert admins[0].user_id == 100
+        assert admins[0].chats == [(self.SUPER_A, "Первый"), (self.SUPER_B, "Второй")]
+
+    @pytest.mark.asyncio
+    async def test_admins_without_ban_rights_are_useless_here(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        client = FakeAdminClient({self.SUPER_A: [
+            admin_member(100, username="can", can_restrict=True),
+            admin_member(200, username="cannot", can_restrict=False),
+        ]})
+        set_app(client)
+        try:
+            admins = await find_chat_admins([(self.SUPER_A, "Чат")])
+        finally:
+            set_app(None)
+
+        assert [a.user_id for a in admins] == [100]
+
+    @pytest.mark.asyncio
+    async def test_owner_counts_even_without_privileges(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        client = FakeAdminClient({self.SUPER_A: [
+            admin_member(100, status="OWNER", privileges_missing=True, username="owner"),
+        ]})
+        set_app(client)
+        try:
+            admins = await find_chat_admins([(self.SUPER_A, "Чат")])
+        finally:
+            set_app(None)
+
+        assert admins[0].owner_of == 1
+        assert admins[0].role == "владелец"
+
+    @pytest.mark.asyncio
+    async def test_myself_and_the_target_are_not_offered(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        client = FakeAdminClient({self.SUPER_A: [
+            admin_member(1, username="me"),
+            admin_member(777, username="target"),
+            admin_member(100, username="boss"),
+        ]})
+        set_app(client)
+        try:
+            admins = await find_chat_admins([(self.SUPER_A, "Чат")], target_user_id=777)
+        finally:
+            set_app(None)
+
+        assert [a.user_id for a in admins] == [100]
+
+    @pytest.mark.asyncio
+    async def test_basic_group_yields_everyone_so_plain_members_are_dropped(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        # В обычных группах pyrogram игнорирует фильтр и отдаёт весь состав.
+        set_me_from_dict({"id": 1, "username": "me"})
+        client = FakeAdminClient({self.BASIC: [
+            admin_member(100, status="OWNER", privileges_missing=True, username="owner"),
+            admin_member(200, status="ADMINISTRATOR", privileges_missing=True, username="adm"),
+            admin_member(300, status="MEMBER", privileges_missing=True, username="plain"),
+        ]})
+        set_app(client)
+        try:
+            admins = await find_chat_admins([(self.BASIC, "Группа")])
+        finally:
+            set_app(None)
+
+        assert sorted(a.user_id for a in admins) == [100, 200]
+
+    @pytest.mark.asyncio
+    async def test_sorted_by_reach_then_bots_last(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        wide = lambda: admin_member(100, username="wide")
+        bot = lambda: admin_member(200, username="bot", is_bot=True)
+        narrow = lambda: admin_member(300, username="narrow")
+        client = FakeAdminClient({
+            self.SUPER_A: [wide(), bot(), narrow()],
+            self.SUPER_B: [wide(), bot()],
+        })
+        set_app(client)
+        try:
+            admins = await find_chat_admins([(self.SUPER_A, "A"), (self.SUPER_B, "B")])
+        finally:
+            set_app(None)
+
+        # два чата у обоих, но бот уходит вниз
+        assert [a.user_id for a in admins] == [100, 200, 300]
+
+    @pytest.mark.asyncio
+    async def test_unreadable_chat_does_not_stop_the_sweep(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        client = FakeAdminClient(
+            {self.SUPER_A: [admin_member(100, username="boss")],
+             self.SUPER_B: [admin_member(200, username="other")]},
+            broken=[self.SUPER_A],
+        )
+        set_app(client)
+        try:
+            admins = await find_chat_admins([(self.SUPER_A, "Закрытый"), (self.SUPER_B, "Открытый")])
+        finally:
+            set_app(None)
+
+        assert [a.user_id for a in admins] == [200]
+        assert client.asked == [self.SUPER_A, self.SUPER_B]
+
+    @pytest.mark.asyncio
+    async def test_progress_is_reported_per_chat(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        client = FakeAdminClient({self.SUPER_A: [admin_member(100)], self.SUPER_B: []})
+        seen = []
+        set_app(client)
+        try:
+            await find_chat_admins(
+                [(self.SUPER_A, "A"), (self.SUPER_B, "B")],
+                status_callback=lambda n, total, title: seen.append((n, total, title)),
+            )
+        finally:
+            set_app(None)
+
+        assert seen == [(1, 2, "A"), (2, 2, "B")]
+
+    @pytest.mark.asyncio
+    async def test_stop_event_interrupts(self, no_member_delays):
+        import threading
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        stop = threading.Event()
+
+        class StoppingClient(FakeAdminClient):
+            def get_chat_members(self, chat_id, filter=None):
+                stop.set()
+                return super().get_chat_members(chat_id, filter)
+
+        client = StoppingClient({self.SUPER_A: [admin_member(100)], self.SUPER_B: [admin_member(200)]})
+        set_app(client)
+        try:
+            await find_chat_admins([(self.SUPER_A, "A"), (self.SUPER_B, "B")], stop_event=stop)
+        finally:
+            set_app(None)
+
+        assert client.asked == [self.SUPER_A]
+
+    @pytest.mark.asyncio
+    async def test_empty_chat_list_is_rejected(self, no_member_delays):
+        from core import find_chat_admins, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        set_app(FakeAdminClient({}))
+        try:
+            with pytest.raises(ValueError):
+                await find_chat_admins([])
+        finally:
+            set_app(None)

@@ -44,6 +44,7 @@ from ui.theme import (
 )
 from ui.queues import scan_paused, scan_stop_requested
 from ui.tooltip import bind_tooltip
+from ui.admins_dialog import AdminsDialog
 
 log = logging.getLogger("tg_deleter")
 
@@ -115,19 +116,22 @@ class MemberRow(ctk.CTkFrame):
 class MembersFrame(ctk.CTkFrame):
     """Поиск человека и массовые операции с его участием в чатах."""
 
-    def __init__(self, parent, on_resolve_user, on_find_chats, on_load_chats, on_remove, on_add, **kw):
+    def __init__(self, parent, on_resolve_user, on_find_chats, on_load_chats, on_remove, on_add,
+                 on_find_admins=None, **kw):
         super().__init__(parent, fg_color="transparent", **kw)
         self.on_resolve_user = on_resolve_user
         self.on_find_chats = on_find_chats
         self.on_load_chats = on_load_chats
         self.on_remove = on_remove
         self.on_add = on_add
+        self.on_find_admins = on_find_admins
 
         self.target = None
         self.mode = MODE_REMOVE
         self._busy = False
         self._paused = False
         self._search_job = None
+        self._admins_chats = 0
         # Свои списки и выбор для каждого режима, чтобы переключение их не сбрасывало.
         self._items = {MODE_REMOVE: [], MODE_ADD: []}
         self._selected = {MODE_REMOVE: set(), MODE_ADD: set()}
@@ -223,6 +227,15 @@ class MembersFrame(ctk.CTkFrame):
         self.add_btn = ctk.CTkButton(
             self.actions, text="Добавить в выбранные", command=self._add_selected, corner_radius=BTN_RADIUS,
             width=200, height=36, fg_color=BTN_SECONDARY, state="disabled",
+        )
+        self.admins_btn = ctk.CTkButton(
+            self.actions, text="Кто может удалить", command=self._find_admins, corner_radius=BTN_RADIUS,
+            width=180, height=36, fg_color=BTN_SECONDARY, state="disabled",
+        )
+        bind_tooltip(
+            self.admins_btn,
+            "Соберёт администраторов тех чатов, где прав у вас нет, и покажет, "
+            "кому написать. Один админ обычно закрывает сразу десятки чатов.",
         )
         self.pause_btn = ctk.CTkButton(
             self.actions, text="Пауза", command=self._toggle_pause, corner_radius=BTN_RADIUS,
@@ -337,12 +350,13 @@ class MembersFrame(ctk.CTkFrame):
         options.pack(fill="x", after=self.mode_switch)
         # Кнопки пакуются справа налево, поэтому порядок задаём заново на каждом переключении.
         for btn in (self.find_chats_btn, self.remove_btn, self.load_chats_btn,
-                    self.add_btn, self.pause_btn, self.stop_btn):
+                    self.add_btn, self.admins_btn, self.pause_btn, self.stop_btn):
             btn.pack_forget()
-        primary, action = (
-            (self.find_chats_btn, self.remove_btn) if remove_mode else (self.load_chats_btn, self.add_btn)
-        )
-        for btn in (primary, action, self.pause_btn, self.stop_btn):
+        if remove_mode:
+            order = [self.find_chats_btn, self.remove_btn, self.admins_btn]
+        else:
+            order = [self.load_chats_btn, self.add_btn]
+        for btn in order + [self.pause_btn, self.stop_btn]:
             btn.pack(side="right", padx=PAD_SM)
         self._results = {}
         self._apply_filter()
@@ -356,6 +370,7 @@ class MembersFrame(ctk.CTkFrame):
         self.find_chats_btn.configure(state="normal" if has_user else "disabled")
         self.remove_btn.configure(state="normal" if has_user and selected else "disabled")
         self.add_btn.configure(state="normal" if has_user and selected else "disabled")
+        self.admins_btn.configure(state="normal" if self._chats_without_rights() else "disabled")
 
     # ------------------------------------------------------------------
     # Запуск операций
@@ -444,6 +459,46 @@ class MembersFrame(ctk.CTkFrame):
         self.status_label.configure(text="Добавляю в чаты: 0/%s…" % len(pairs))
         self.on_add(self.target.user_id, pairs)
 
+    def _chats_without_rights(self):
+        """Чаты, где удалить сами не можем, — именно там нужен чужой админ."""
+        return [(c.chat_id, c.title) for c in self._items[MODE_REMOVE] if not c.can_manage]
+
+    def _find_admins(self):
+        if self._busy or not self.on_find_admins:
+            return
+        pairs = self._chats_without_rights()
+        if not pairs:
+            messagebox.showinfo(
+                "Участники",
+                "Нет чатов, где вам не хватает прав. Сначала нажмите «Найти чаты».",
+            )
+            return
+        scan_paused.clear()
+        scan_stop_requested.clear()
+        self._admins_chats = len(pairs)
+        self.set_busy(True, "Ищу админов")
+        self.status_label.configure(text="Собираю админов: 0/%s…" % len(pairs))
+        self.on_find_admins(pairs, self.target.user_id if self.target else None)
+
+    def update_admins_progress(self, n, total, title):
+        self.status_label.configure(
+            text="Собираю админов: %s/%s · %s" % (n, total, _shorten(title, 40))
+        )
+
+    def finish_admins(self, admins, stopped):
+        self.set_busy(False)
+        prefix = "Поиск остановлен." if stopped else "Готово."
+        self.status_label.configure(
+            text="%s Людей, которые могут удалить: %s." % (prefix, len(admins))
+        )
+        AdminsDialog(
+            self.winfo_toplevel(),
+            admins,
+            target_name=self.target.display_name if self.target else "",
+            chats_count=getattr(self, "_admins_chats", 0),
+            stopped=stopped,
+        )
+
     # ------------------------------------------------------------------
     # Состояние выполнения
     # ------------------------------------------------------------------
@@ -457,6 +512,7 @@ class MembersFrame(ctk.CTkFrame):
             self.load_chats_btn.configure(state="disabled")
             self.remove_btn.configure(state="disabled")
             self.add_btn.configure(state="disabled")
+            self.admins_btn.configure(state="disabled")
             self.pause_btn.configure(state="normal", text="Пауза")
             self.stop_btn.configure(state="normal")
             self.progress.pack(fill="x", pady=(0, PAD))
@@ -587,6 +643,7 @@ class MembersFrame(ctk.CTkFrame):
         self._items = {MODE_REMOVE: [], MODE_ADD: []}
         self._selected = {MODE_REMOVE: set(), MODE_ADD: set()}
         self._results = {}
+        self._admins_chats = 0
         self.set_busy(False)
         self._hide_action_progress()
         self.user_label.configure(

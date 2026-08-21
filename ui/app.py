@@ -65,6 +65,7 @@ from ui.messages import (
     UserResolvedMsg, MemberChatsProgressMsg, MemberChatFoundMsg, MemberChatsDoneMsg,
     MemberDialogsProgressMsg, MemberDialogsBatchMsg, MemberDialogsDoneMsg,
     MemberActionProgressMsg, MemberActionDoneMsg,
+    AdminsProgressMsg, AdminFoundMsg, AdminsDoneMsg,
     ErrorMsg, FloodWaitMsg, ConnectionStatusMsg,
 )
 
@@ -166,6 +167,7 @@ class App:
             on_load_chats=self._on_load_member_chats,
             on_remove=self._on_remove_user_from_chats,
             on_add=self._on_add_user_to_chats,
+            on_find_admins=self._on_find_chat_admins,
         )
 
         self._log_visible = False
@@ -211,6 +213,9 @@ class App:
             "MemberDialogsDoneMsg": self._handle_member_dialogs_done,
             "MemberActionProgressMsg": self._handle_member_action_progress,
             "MemberActionDoneMsg": self._handle_member_action_done,
+            "AdminsProgressMsg": self._handle_admins_progress,
+            "AdminFoundMsg": self._handle_admin_found,
+            "AdminsDoneMsg": self._handle_admins_done,
             "ErrorMsg": self._handle_error,
             "FloodWaitMsg": self._handle_flood_wait,
             "ConnectionStatusMsg": self._handle_connection_status,
@@ -528,6 +533,13 @@ class App:
         if not self._member_op_ready():
             return
         request_queue.put(("add_user_to_chats", user_id, chat_pairs))
+
+    def _on_find_chat_admins(self, chat_pairs, target_user_id):
+        if not self._member_op_ready():
+            return
+        request_queue.put((
+            "find_chat_admins", chat_pairs, target_user_id, scan_paused, scan_stop_requested,
+        ))
 
     def _open_place(self, place: Place):
         self.places_frame.pack_forget()
@@ -923,6 +935,17 @@ class App:
         self._operation_running = False
         self.members_frame.finish_action(msg.action, msg.results, msg.stopped)
 
+    def _handle_admins_progress(self, msg):
+        self.members_frame.update_admins_progress(msg.n, msg.total, msg.title)
+
+    def _handle_admin_found(self, msg):
+        log.debug("Got admin_found: %s", msg.admin.user_id)
+
+    def _handle_admins_done(self, msg):
+        log.debug("Got admins_done: %s человек", len(msg.admins))
+        self._operation_running = False
+        self.members_frame.finish_admins(msg.admins, msg.stopped)
+
     def _handle_error(self, msg):
         if isinstance(msg, ErrorMsg):
             op, err = msg.operation, msg.error
@@ -945,7 +968,8 @@ class App:
             # Причина уже видна в карточке пользователя — отдельное окно не нужно.
             self.members_frame.set_user_error(err)
             return
-        if op in ("find_user_chats", "list_member_chats", "remove_user_from_chats", "add_user_to_chats"):
+        if op in ("find_user_chats", "list_member_chats", "remove_user_from_chats",
+                  "add_user_to_chats", "find_chat_admins"):
             self.members_frame.set_busy(False)
             self.members_frame.status_label.configure(text="Ошибка: %s" % err)
         self._operation_running = False

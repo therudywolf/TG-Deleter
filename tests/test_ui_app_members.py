@@ -38,6 +38,9 @@ from ui.messages import (  # noqa: E402
     FloodWaitMsg,
     MemberActionDoneMsg,
     MemberActionProgressMsg,
+    AdminsProgressMsg,
+    AdminFoundMsg,
+    AdminsDoneMsg,
     MemberChatFoundMsg,
     MemberChatsDoneMsg,
     MemberChatsProgressMsg,
@@ -294,3 +297,61 @@ class TestOutgoingRequests:
         app._on_add_user_to_chats(777, [(-2001, "Канал")])
         assert drain() == []
         assert app.box.kinds() == ["warning"] * 5
+
+
+class TestAdminLookupWiring:
+    """Поиск админов: сообщения воркера и запрос к нему."""
+
+    def test_handlers_are_registered(self, app):
+        for name in ("AdminsProgressMsg", "AdminFoundMsg", "AdminsDoneMsg"):
+            assert name in app._msg_handlers
+
+    def test_progress_reaches_the_screen(self, app):
+        app._msg_handlers["AdminsProgressMsg"](
+            AdminsProgressMsg(n=7, total=40, title="ДИТ. WAF - КППМ")
+        )
+        text = app.members_frame.status_label.cget("text")
+        assert "7/40" in text and "КППМ" in text
+
+    def test_found_admin_is_only_logged(self, app):
+        from core import AdminContact
+
+        # Промежуточные находки не трогают экран — итог показывает окно.
+        before = app.members_frame.status_label.cget("text")
+        app._msg_handlers["AdminFoundMsg"](AdminFoundMsg(admin=AdminContact(user_id=5, username="x")))
+        assert app.members_frame.status_label.cget("text") == before
+
+    def test_done_opens_the_dialog(self, app, monkeypatch):
+        import ui.members_frame as members_frame
+        from core import AdminContact
+
+        opened = {}
+
+        class FakeDialog:
+            def __init__(self, parent, admins, target_name="", chats_count=0, stopped=False):
+                opened.update(admins=admins, stopped=stopped)
+
+        monkeypatch.setattr(members_frame, "AdminsDialog", FakeDialog)
+        app._operation_running = True
+        admins = [AdminContact(user_id=5, username="boss")]
+        app._msg_handlers["AdminsDoneMsg"](AdminsDoneMsg(admins=admins, stopped=False))
+        app.root.update()
+        assert opened["admins"] is admins
+        assert app._operation_running is False
+
+    def test_request_carries_pairs_and_target(self, app):
+        from ui.queues import scan_paused, scan_stop_requested
+
+        app._on_find_chat_admins([(-1002, "Чужой чат")], 777)
+        sent = drain()
+        assert len(sent) == 1
+        assert sent[0][:3] == ("find_chat_admins", [(-1002, "Чужой чат")], 777)
+        assert sent[0][3] is scan_paused and sent[0][4] is scan_stop_requested
+
+    def test_error_unlocks_the_screen(self, app):
+        app.members_frame.set_busy(True, "Ищу админов")
+        app._operation_running = True
+        app._msg_handlers["ErrorMsg"](ErrorMsg(operation="find_chat_admins", error="Нет подключения"))
+        app.root.update()
+        assert app.members_frame._busy is False
+        assert "Нет подключения" in app.members_frame.status_label.cget("text")

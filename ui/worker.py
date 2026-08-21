@@ -40,6 +40,7 @@ from core import (
     find_chats_with_user,
     remove_user_from_chats,
     add_user_to_chats,
+    find_chat_admins,
     get_scan_delay_between_chats,
     get_export_parallel_chats,
     get_export_include_media,
@@ -56,6 +57,7 @@ from ui.messages import (
     UserResolvedMsg, MemberChatsProgressMsg, MemberChatFoundMsg, MemberChatsDoneMsg,
     MemberDialogsProgressMsg, MemberDialogsBatchMsg, MemberDialogsDoneMsg,
     MemberActionProgressMsg, MemberActionDoneMsg,
+    AdminsProgressMsg, AdminFoundMsg, AdminsDoneMsg,
     SwitchAccountDoneMsg, LogMsg, ErrorMsg, FloodWaitMsg, ConnectionStatusMsg,
 )
 
@@ -388,6 +390,35 @@ def worker_loop():
                                     session=session,
                                 ))
                                 log.debug("worker: put member_dialogs_done, dialogs=%s", len(dialogs))
+                            elif req[0] == "find_chat_admins":
+                                chat_pairs = req[1]
+                                admin_target_id = req[2]
+                                pause_ev = req[3]
+                                stop_ev = req[4]
+
+                                def on_admin(contact):
+                                    response_queue.put(AdminFoundMsg(admin=contact))
+
+                                def on_admin_progress(n, total, title):
+                                    response_queue.put(AdminsProgressMsg(n=n, total=total, title=title))
+
+                                def on_admin_flood(seconds):
+                                    response_queue.put(FloodWaitMsg(seconds=seconds, operation="find_chat_admins"))
+
+                                admins = await find_chat_admins(
+                                    chat_pairs,
+                                    target_user_id=admin_target_id,
+                                    pause_event=pause_ev,
+                                    stop_event=stop_ev,
+                                    progress_callback=on_admin,
+                                    status_callback=on_admin_progress,
+                                    flood_callback=on_admin_flood,
+                                )
+                                response_queue.put(AdminsDoneMsg(
+                                    admins=admins,
+                                    stopped=stop_ev is not None and stop_ev.is_set(),
+                                ))
+                                log.debug("worker: put admins_done, людей=%s", len(admins))
                             elif req[0] in ("remove_user_from_chats", "add_user_to_chats"):
                                 action = "remove" if req[0] == "remove_user_from_chats" else "add"
                                 user_id = req[1]

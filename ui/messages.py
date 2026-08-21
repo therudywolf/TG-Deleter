@@ -204,3 +204,21 @@ class MemberActionDoneMsg(WorkerMsg):
     action: str  # "remove" | "add"
     results: list
     stopped: bool
+
+
+@dataclass
+class AdminsProgressMsg(WorkerMsg):
+    n: int
+    total: int
+    title: str
+
+
+@dataclass
+class AdminFoundMsg(WorkerMsg):
+    admin: Any  # AdminContact
+
+
+@dataclass
+class AdminsDoneMsg(WorkerMsg):
+    admins: list
+    stopped: bool
