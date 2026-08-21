@@ -19,7 +19,7 @@
 """
 Ядро TG Deleter: api_config.json (API и скан), config.json (аккаунты/сессия), Pyrogram-клиент.
 """
-__version__ = "0.8.0-beta.1"
+__version__ = "0.9.0-beta.1"
 
 import os
 import sys
@@ -37,6 +37,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from pyrogram import Client
+from pyrogram import utils as pyro_utils
 from pyrogram.errors import FloodWait
 from pyrogram.enums import ChatType
 
@@ -1448,3 +1449,598 @@ async def export_chats_streaming(options: ExportOptions, pause_event=None, stop_
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     emit("done", export_root=str(export_root), manifest=manifest)
     return str(export_root), manifest
+
+
+# ---------------------------------------------------------------------------
+# Участники: удалить человека из чатов и добавить его в выбранные чаты
+# ---------------------------------------------------------------------------
+
+# Понятные подписи для типовых ошибок Telegram при работе с участниками.
+_MEMBER_ERROR_TEXTS = {
+    "ChatAdminRequired": "Нужны права администратора",
+    "UserAdminInvalid": "Это администратор — сначала снимите с него права",
+    "UserNotParticipant": "Не состоит в чате",
+    "UserPrivacyRestricted": "Настройки приватности не позволяют добавить",
+    "UserNotMutualContact": "Нужен взаимный контакт",
+    "UserAlreadyParticipant": "Уже в чате",
+    "UsersTooMuch": "В чате достигнут лимит участников",
+    "UserChannelsTooMuch": "У пользователя слишком много чатов",
+    "UserBlocked": "Пользователь вас заблокировал",
+    "UserBannedInChannel": "Вам запрещено это действие в чате",
+    "UserKicked": "Пользователь исключён из чата",
+    "UserRestricted": "Ваш аккаунт ограничен Telegram",
+    "InputUserDeactivated": "Аккаунт пользователя удалён",
+    "PeerIdInvalid": "Telegram не знает такого пользователя или чат",
+    "UserIdInvalid": "Некорректный ID пользователя",
+    "ChatIdInvalid": "Некорректный ID чата",
+    "ChannelInvalid": "Чат недоступен",
+    "ChannelPrivate": "Нет доступа к чату",
+    "ChatWriteForbidden": "Нет доступа к чату",
+    "UsernameInvalid": "Некорректный @username",
+    "UsernameNotOccupied": "Такого @username не существует",
+    "BotGroupsBlocked": "Этого бота нельзя добавлять в группы",
+}
+_MAX_ERROR_TEXT = 120
+# Нижние границы пауз между чатами: Telegram болезненно относится к правке участников пачками.
+_MEMBER_PROBE_DELAY_MIN = 0.3
+_MEMBER_REMOVE_DELAY_MIN = 0.5
+_MEMBER_ADD_DELAY_MIN = 1.0
+
+_USERNAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,31}")
+_TME_LINK_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/(@?[A-Za-z0-9_]{2,32})/?$",
+    re.IGNORECASE,
+)
+
+
+def describe_telegram_error(exc) -> str:
+    """Короткое понятное описание ошибки Telegram — по имени класса исключения."""
+    name = type(exc).__name__
+    known = _MEMBER_ERROR_TEXTS.get(name)
+    if known:
+        return known
+    text = " ".join(str(exc or "").split())
+    if not text:
+        return name
+    if len(text) > _MAX_ERROR_TEXT:
+        text = text[:_MAX_ERROR_TEXT - 1] + "…"
+    return f"{name}: {text}"
+
+
+def normalize_user_query(query: str):
+    """
+    Превратить ввод пользователя в аргумент для Pyrogram.
+
+    Понимает «@username», «username», ссылку t.me/username, числовой ID и телефон.
+    """
+    q = " ".join(str(query or "").split())
+    if not q:
+        raise ValueError("Укажите @username, ID или телефон пользователя.")
+    link = _TME_LINK_RE.match(q)
+    if link:
+        q = link.group(1)
+    q = q.lstrip("@")
+    if re.fullmatch(r"-?\d{1,19}", q):
+        uid = int(q)
+        if uid <= 0:
+            raise ValueError("Это идентификатор чата, а не пользователя.")
+        return uid
+    if q.startswith("+"):
+        digits = re.sub(r"\D", "", q)
+        if len(digits) >= 6 and re.fullmatch(r"\+[\d\s()\-]+", q):
+            return "+" + digits
+        raise ValueError("Похоже на телефон, но номер разобрать не вышло.")
+    if _USERNAME_RE.fullmatch(q):
+        return q
+    raise ValueError("Не похоже на @username, ID или телефон.")
+
+
+@dataclass
+class TargetUser:
+    """Пользователь, которого добавляем в чаты или удаляем из них."""
+    user_id: int
+    username: str | None = None
+    first_name: str = ""
+    last_name: str = ""
+    phone: str | None = None
+    is_bot: bool = False
+    is_deleted: bool = False
+
+    @property
+    def display_name(self) -> str:
+        name = f"{self.first_name} {self.last_name}".strip()
+        if name:
+            return name
+        if self.username:
+            return f"@{self.username}"
+        return str(self.user_id)
+
+    @property
+    def summary(self) -> str:
+        parts = [self.display_name]
+        if self.username and not self.display_name.startswith("@"):
+            parts.append(f"@{self.username}")
+        parts.append(f"ID {self.user_id}")
+        if self.is_bot:
+            parts.append("бот")
+        if self.is_deleted:
+            parts.append("аккаунт удалён")
+        return " · ".join(parts)
+
+
+@dataclass
+class MemberChat:
+    """Чат-кандидат для операций с участником."""
+    chat_id: int
+    title: str
+    type_str: str
+    my_status: str = "unknown"       # owner / administrator / member / left / banned / unknown
+    target_status: str = "unknown"   # owner / administrator / member / restricted / absent / unknown
+    can_manage: bool = False
+    note: str = ""
+
+
+@dataclass
+class MemberActionResult:
+    """Итог операции по одному чату."""
+    chat_id: int
+    title: str
+    ok: bool
+    note: str
+
+
+class _OperationStopped(Exception):
+    """Внутренний сигнал: пользователь нажал «Стоп»."""
+
+
+MY_STATUS_LABELS = {
+    "owner": "вы владелец",
+    "administrator": "вы админ",
+    "member": "вы участник",
+    "restricted": "вы ограничены",
+    "left": "вас нет в чате",
+    "banned": "вы забанены",
+}
+
+TARGET_STATUS_LABELS = {
+    "owner": "владелец чата",
+    "administrator": "администратор",
+    "member": "участник",
+    "restricted": "ограничен",
+    "left": "вышел",
+    "banned": "забанен",
+    "absent": "не в чате",
+}
+
+
+def _member_status_key(member) -> str:
+    """Статус участника строкой: owner / administrator / member / restricted / left / banned."""
+    status = getattr(member, "status", None)
+    return str(getattr(status, "name", status) or "").lower()
+
+
+def _can_restrict_members(member) -> bool:
+    """Может ли текущий аккаунт удалять участников — по своему членству в чате."""
+    key = _member_status_key(member)
+    if key == "owner":
+        return True
+    if key == "administrator":
+        privileges = getattr(member, "privileges", None)
+        return bool(getattr(privileges, "can_restrict_members", False))
+    return False
+
+
+def _peer_kind(chat_id) -> str:
+    """«chat» — обычная группа, «channel» — супергруппа или канал, «user» — личка."""
+    try:
+        return pyro_utils.get_peer_type(int(chat_id))
+    except (ValueError, TypeError):
+        return "unknown"
+
+
+async def _call_with_floodwait(factory, pause_event=None, stop_event=None, attempts=4, flood_callback=None):
+    """
+    Выполнить один запрос к Telegram, пережидая FloodWait.
+
+    Бросает _OperationStopped, если во время ожидания нажали «Стоп».
+    """
+    last_flood = None
+    for _ in range(max(1, attempts)):
+        if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+            raise _OperationStopped
+        try:
+            return await factory()
+        except FloodWait as e:
+            last_flood = e
+            log.warning("FloodWait %s сек при работе с участниками", e.value)
+            if flood_callback:
+                try:
+                    flood_callback(e.value)
+                except Exception:
+                    pass
+            if not await _sleep_responsive(e.value, pause_event, stop_event):
+                raise _OperationStopped
+    if last_flood is not None:
+        raise last_flood
+    raise _OperationStopped
+
+
+def _fill_member_note(mc: MemberChat) -> MemberChat:
+    """Проставить can_manage и человекочитаемую причину для карточки чата."""
+    if mc.target_status == "owner":
+        mc.can_manage = False
+        mc.note = "владелец чата"
+    elif mc.target_status == "administrator":
+        mc.can_manage = False
+        mc.note = "админ — снимите права"
+    elif not mc.can_manage:
+        if mc.my_status in ("owner", "administrator"):
+            mc.note = "нет права банить"
+        elif mc.my_status == "unknown":
+            mc.note = mc.note or "права не проверить"
+        else:
+            mc.note = "вы не админ"
+    else:
+        mc.note = "можно удалить"
+    return mc
+
+
+async def _probe_member_chat(
+    client,
+    chat_id,
+    title,
+    type_str,
+    target_user_id,
+    assume_member,
+    pause_event=None,
+    stop_event=None,
+    flood_callback=None,
+) -> "MemberChat | None":
+    """
+    Узнать по одному чату: состоит ли там цель и можем ли мы её оттуда убрать.
+
+    assume_member=True — участие уже известно (список общих чатов), лишний запрос не делаем.
+    Возвращает None, если цели в чате нет или список участников нам не виден.
+    """
+    mc = MemberChat(chat_id=chat_id, title=title, type_str=type_str)
+    if not assume_member:
+        try:
+            member = await _call_with_floodwait(
+                lambda: client.get_chat_member(chat_id, target_user_id),
+                pause_event, stop_event, flood_callback=flood_callback,
+            )
+        except _OperationStopped:
+            raise
+        except Exception as e:
+            # UserNotParticipant — цели нет; остальное обычно значит «участников нам не видно».
+            log.debug("Проверка участия в чате %s: %s", chat_id, e)
+            return None
+        status = _member_status_key(member)
+        if status in ("left", "banned"):
+            return None
+        mc.target_status = status or "member"
+    else:
+        mc.target_status = "member"
+
+    try:
+        me_member = await _call_with_floodwait(
+            lambda: client.get_chat_member(chat_id, "me"),
+            pause_event, stop_event, flood_callback=flood_callback,
+        )
+    except _OperationStopped:
+        raise
+    except Exception as e:
+        mc.note = describe_telegram_error(e)
+        return _fill_member_note(mc)
+    mc.my_status = _member_status_key(me_member) or "unknown"
+    mc.can_manage = _can_restrict_members(me_member)
+
+    # В быстром режиме уточняем статус цели, только если удалять её вообще можем.
+    if assume_member and mc.can_manage:
+        try:
+            member = await _call_with_floodwait(
+                lambda: client.get_chat_member(chat_id, target_user_id),
+                pause_event, stop_event, flood_callback=flood_callback,
+            )
+        except _OperationStopped:
+            raise
+        except Exception as e:
+            if type(e).__name__ == "UserNotParticipant":
+                return None
+            log.debug("Уточнение статуса в чате %s: %s", chat_id, e)
+        else:
+            status = _member_status_key(member)
+            if status in ("left", "banned"):
+                return None
+            mc.target_status = status or "member"
+    return _fill_member_note(mc)
+
+
+async def resolve_target_user(query: str) -> TargetUser:
+    """Найти пользователя по @username, числовому ID, телефону или ссылке t.me."""
+    client = get_app()
+    if not client:
+        raise RuntimeError("Нет подключения к Telegram.")
+    arg = normalize_user_query(query)
+    try:
+        user = await client.get_users(arg)
+    except FloodWait:
+        raise
+    except Exception as e:
+        if isinstance(arg, int) and type(e).__name__ in ("PeerIdInvalid", "UserIdInvalid"):
+            raise ValueError(
+                "Telegram не отдаёт пользователя по одному числовому ID, если вы с ним нигде "
+                "не пересекались. Попробуйте @username или телефон."
+            ) from e
+        raise ValueError(describe_telegram_error(e)) from e
+    if not user or getattr(user, "id", None) is None:
+        raise ValueError("Пользователь не найден.")
+    target = TargetUser(
+        user_id=int(user.id),
+        username=(getattr(user, "username", None) or "").strip() or None,
+        first_name=(getattr(user, "first_name", None) or "").strip(),
+        last_name=(getattr(user, "last_name", None) or "").strip(),
+        phone=getattr(user, "phone_number", None) or None,
+        is_bot=bool(getattr(user, "is_bot", False)),
+        is_deleted=bool(getattr(user, "is_deleted", False)),
+    )
+    my_id = state.get_user_id()
+    if my_id is not None and target.user_id == int(my_id):
+        raise ValueError("Это вы сами — выберите другого пользователя.")
+    return target
+
+
+async def find_chats_with_user(
+    user_id: int,
+    deep: bool = False,
+    include_groups: bool = True,
+    include_channels: bool = True,
+    pause_event=None,
+    stop_event=None,
+    progress_callback=None,
+    status_callback=None,
+    flood_callback=None,
+) -> list[MemberChat]:
+    """
+    Найти чаты, где состоит указанный пользователь.
+
+    deep=False — быстро, через список общих чатов Telegram (до 100 штук).
+    deep=True — обойти все диалоги и проверить участие в каждом; медленно, но полно.
+    progress_callback(MemberChat) — на каждый найденный чат.
+    status_callback(n, total, title) — прогресс обхода; total=None, когда он неизвестен.
+    """
+    client = get_app()
+    if not client:
+        raise RuntimeError("Нет подключения к Telegram.")
+    my_id = state.get_user_id()
+    if my_id is not None and int(user_id) == int(my_id):
+        raise ValueError("Это вы сами — выберите другого пользователя.")
+
+    found: list[MemberChat] = []
+    delay = max(get_delay_sec(), _MEMBER_PROBE_DELAY_MIN)
+
+    def emit_status(n, total, title):
+        if status_callback:
+            try:
+                status_callback(n, total, title)
+            except Exception:
+                pass
+
+    def emit_found(mc):
+        found.append(mc)
+        if progress_callback:
+            try:
+                progress_callback(mc)
+            except Exception:
+                pass
+
+    def wanted(chat) -> bool:
+        if _is_private_chat_type(chat):
+            return False
+        if _is_group_chat_type(chat) and not include_groups:
+            return False
+        if _is_channel_chat_type(chat) and not include_channels:
+            return False
+        return True
+
+    log.debug("find_chats_with_user: user_id=%s deep=%s", user_id, deep)
+    try:
+        if deep:
+            n = 0
+            async for dialog in client.get_dialogs():
+                if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                    break
+                chat = dialog.chat
+                if not wanted(chat):
+                    continue
+                n += 1
+                title = _chat_title(chat)
+                emit_status(n, None, title)
+                mc = await _probe_member_chat(
+                    client, chat.id, title, _chat_type_str(chat), user_id, False,
+                    pause_event, stop_event, flood_callback,
+                )
+                if mc:
+                    emit_found(mc)
+                if not await _sleep_responsive(delay, pause_event, stop_event):
+                    break
+        else:
+            chats = await _call_with_floodwait(
+                lambda: client.get_common_chats(user_id),
+                pause_event, stop_event, flood_callback=flood_callback,
+            )
+            candidates = [c for c in (chats or []) if wanted(c)]
+            total = len(candidates)
+            for i, chat in enumerate(candidates, 1):
+                if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                    break
+                title = _chat_title(chat)
+                emit_status(i, total, title)
+                mc = await _probe_member_chat(
+                    client, chat.id, title, _chat_type_str(chat), user_id, True,
+                    pause_event, stop_event, flood_callback,
+                )
+                if mc:
+                    emit_found(mc)
+                if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+                    break
+    except _OperationStopped:
+        log.debug("find_chats_with_user: остановлено пользователем")
+    found.sort(key=lambda c: (not c.can_manage, (c.title or "").lower()))
+    log.debug("find_chats_with_user done: чатов %s", len(found))
+    return found
+
+
+def _action_targets(chats):
+    """Привести список чатов к парам (chat_id, title); принимает id, кортежи, MemberChat и Place."""
+    targets = []
+    for item in chats or []:
+        if isinstance(item, (MemberChat, Place)):
+            targets.append((int(item.chat_id), item.title or str(item.chat_id)))
+        elif isinstance(item, (tuple, list)) and item:
+            cid = int(item[0])
+            title = str(item[1]) if len(item) > 1 and item[1] else str(cid)
+            targets.append((cid, title))
+        else:
+            cid = int(item)
+            targets.append((cid, str(cid)))
+    return targets
+
+
+async def remove_user_from_chats(
+    user_id: int,
+    chats,
+    ban: bool = True,
+    pause_event=None,
+    stop_event=None,
+    progress_callback=None,
+    flood_callback=None,
+) -> list[MemberActionResult]:
+    """
+    Удалить пользователя из указанных чатов.
+
+    ban=True — забанить, вернуться сам не сможет.
+    ban=False — просто выкинуть: в супергруппах и каналах бан сразу снимается.
+    progress_callback(i, total, MemberActionResult) — после каждого чата.
+    """
+    client = get_app()
+    if not client:
+        raise RuntimeError("Нет подключения к Telegram.")
+    my_id = state.get_user_id()
+    if my_id is not None and int(user_id) == int(my_id):
+        raise ValueError("Это вы сами — выберите другого пользователя.")
+
+    targets = _action_targets(chats)
+    if not targets:
+        raise ValueError("Не выбраны чаты.")
+    results: list[MemberActionResult] = []
+    delay = max(get_delay_sec(), _MEMBER_REMOVE_DELAY_MIN)
+    total = len(targets)
+    log.debug("remove_user_from_chats: user_id=%s чатов=%s ban=%s", user_id, total, ban)
+
+    def emit(i, result):
+        results.append(result)
+        if progress_callback:
+            try:
+                progress_callback(i, total, result)
+            except Exception:
+                pass
+
+    for i, (cid, title) in enumerate(targets, 1):
+        if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+            break
+        try:
+            await _call_with_floodwait(
+                lambda: client.ban_chat_member(cid, user_id),
+                pause_event, stop_event, flood_callback=flood_callback,
+            )
+        except _OperationStopped:
+            break
+        except Exception as e:
+            log.warning("Не удалось удалить %s из чата %s: %s", user_id, cid, e)
+            emit(i, MemberActionResult(chat_id=cid, title=title, ok=False, note=describe_telegram_error(e)))
+            if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+                break
+            continue
+        note = "Удалён и забанен" if ban else "Удалён"
+        # Бан снимаем только там, где он вообще ставится: в обычных группах его нет.
+        if not ban and _peer_kind(cid) == "channel":
+            try:
+                await _call_with_floodwait(
+                    lambda: client.unban_chat_member(cid, user_id),
+                    pause_event, stop_event, flood_callback=flood_callback,
+                )
+            except _OperationStopped:
+                emit(i, MemberActionResult(chat_id=cid, title=title, ok=True, note="Удалён, бан снять не успели"))
+                break
+            except Exception as e:
+                log.warning("Бан в чате %s снять не вышло: %s", cid, e)
+                note = "Удалён, но бан снять не вышло: " + describe_telegram_error(e)
+        emit(i, MemberActionResult(chat_id=cid, title=title, ok=True, note=note))
+        if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+            break
+    log.debug("remove_user_from_chats done: обработано %s из %s", len(results), total)
+    return results
+
+
+async def add_user_to_chats(
+    user_id: int,
+    chats,
+    pause_event=None,
+    stop_event=None,
+    progress_callback=None,
+    flood_callback=None,
+) -> list[MemberActionResult]:
+    """
+    Добавить пользователя в указанные чаты.
+
+    Telegram может отказать из-за приватности пользователя или нехватки прав —
+    такие чаты попадут в отчёт с причиной.
+    """
+    client = get_app()
+    if not client:
+        raise RuntimeError("Нет подключения к Telegram.")
+    my_id = state.get_user_id()
+    if my_id is not None and int(user_id) == int(my_id):
+        raise ValueError("Это вы сами — выберите другого пользователя.")
+
+    targets = _action_targets(chats)
+    if not targets:
+        raise ValueError("Не выбраны чаты.")
+    results: list[MemberActionResult] = []
+    delay = max(get_delay_sec(), _MEMBER_ADD_DELAY_MIN)
+    total = len(targets)
+    log.debug("add_user_to_chats: user_id=%s чатов=%s", user_id, total)
+
+    def emit(i, result):
+        results.append(result)
+        if progress_callback:
+            try:
+                progress_callback(i, total, result)
+            except Exception:
+                pass
+
+    for i, (cid, title) in enumerate(targets, 1):
+        if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+            break
+        try:
+            await _call_with_floodwait(
+                lambda: client.add_chat_members(cid, user_id),
+                pause_event, stop_event, flood_callback=flood_callback,
+            )
+        except _OperationStopped:
+            break
+        except Exception as e:
+            # «Уже в чате» — не ошибка: нужный результат уже достигнут.
+            already = type(e).__name__ == "UserAlreadyParticipant"
+            if not already:
+                log.warning("Не удалось добавить %s в чат %s: %s", user_id, cid, e)
+            emit(i, MemberActionResult(chat_id=cid, title=title, ok=already, note=describe_telegram_error(e)))
+            if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+                break
+            continue
+        emit(i, MemberActionResult(chat_id=cid, title=title, ok=True, note="Добавлен"))
+        if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+            break
+    log.debug("add_user_to_chats done: обработано %s из %s", len(results), total)
+    return results

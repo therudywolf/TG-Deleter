@@ -50,6 +50,7 @@ from ui.cache_export import load_places_from_cache, save_places_to_cache, get_ca
 from ui.places_frame import PlacesFrame
 from ui.posts_frame import PostsFrame
 from ui.export_frame import ExportFrame
+from ui.members_frame import MembersFrame
 from ui.sidebar_frame import SidebarFrame
 from ui.settings_frame import SettingsFrame
 from ui.worker import worker_loop
@@ -61,6 +62,9 @@ from ui.messages import (
     DeleteAllNoScanDoneMsg, DeleteBatchProgressMsg, DeleteBatchDoneMsg,
     ExportProgressMsg, ExportDoneMsg,
     ExportDialogsProgressMsg, ExportDialogsBatchMsg, ExportDialogsDoneMsg,
+    UserResolvedMsg, MemberChatsProgressMsg, MemberChatFoundMsg, MemberChatsDoneMsg,
+    MemberDialogsProgressMsg, MemberDialogsBatchMsg, MemberDialogsDoneMsg,
+    MemberActionProgressMsg, MemberActionDoneMsg,
     ErrorMsg, FloodWaitMsg, ConnectionStatusMsg,
 )
 
@@ -126,6 +130,7 @@ class App:
             on_switch_account=self._on_switch_account,
             on_show_chats=self._show_places,
             on_show_export=self._show_export,
+            on_show_members=self._show_members,
             on_show_settings=self._show_settings,
             on_clear_cache=self._on_clear_cache,
             on_logout=self._on_logout,
@@ -153,6 +158,14 @@ class App:
             content,
             on_load_dialogs=self._on_load_export_dialogs,
             on_export_places=self._on_export_places,
+        )
+        self.members_frame = MembersFrame(
+            content,
+            on_resolve_user=self._on_resolve_user,
+            on_find_chats=self._on_find_user_chats,
+            on_load_chats=self._on_load_member_chats,
+            on_remove=self._on_remove_user_from_chats,
+            on_add=self._on_add_user_to_chats,
         )
 
         self._log_visible = False
@@ -189,6 +202,15 @@ class App:
             "ExportDialogsProgressMsg": self._handle_export_dialogs_progress,
             "ExportDialogsBatchMsg": self._handle_export_dialogs_batch,
             "ExportDialogsDoneMsg": self._handle_export_dialogs_done,
+            "UserResolvedMsg": self._handle_user_resolved,
+            "MemberChatsProgressMsg": self._handle_member_chats_progress,
+            "MemberChatFoundMsg": self._handle_member_chat_found,
+            "MemberChatsDoneMsg": self._handle_member_chats_done,
+            "MemberDialogsProgressMsg": self._handle_member_dialogs_progress,
+            "MemberDialogsBatchMsg": self._handle_member_dialogs_batch,
+            "MemberDialogsDoneMsg": self._handle_member_dialogs_done,
+            "MemberActionProgressMsg": self._handle_member_action_progress,
+            "MemberActionDoneMsg": self._handle_member_action_done,
             "ErrorMsg": self._handle_error,
             "FloodWaitMsg": self._handle_flood_wait,
             "ConnectionStatusMsg": self._handle_connection_status,
@@ -328,6 +350,7 @@ class App:
         self.places_frame.pack_forget()
         self.posts_frame.pack_forget()
         self.export_frame.pack_forget()
+        self.members_frame.pack_forget()
         self.sidebar.set_active_section("settings")
         self.settings_frame.set_initial_setup(False)
         self.settings_frame.refresh_from_config()
@@ -345,6 +368,7 @@ class App:
         self.settings_frame.pack_forget()
         self.posts_frame.pack_forget()
         self.export_frame.pack_forget()
+        self.members_frame.pack_forget()
         self.sidebar.set_active_section("chats")
         self.places_frame.pack(fill="both", expand=True)
 
@@ -352,8 +376,17 @@ class App:
         self.settings_frame.pack_forget()
         self.posts_frame.pack_forget()
         self.places_frame.pack_forget()
+        self.members_frame.pack_forget()
         self.sidebar.set_active_section("export")
         self.export_frame.pack(fill="both", expand=True)
+
+    def _show_members(self):
+        self.settings_frame.pack_forget()
+        self.posts_frame.pack_forget()
+        self.places_frame.pack_forget()
+        self.export_frame.pack_forget()
+        self.sidebar.set_active_section("members")
+        self.members_frame.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------
     # Account management
@@ -446,6 +479,55 @@ class App:
         self.places_frame.status_label.configure(text=f"Бекап выбранных чатов: {len(chat_ids)}, параллельно: {parallel_chats}...")
         self.export_frame.status_label.configure(text=f"Бекап выбранных чатов: {len(chat_ids)}, параллельно: {parallel_chats}...")
         request_queue.put(("export_chats", output_dir, chat_ids, export_options or {}))
+
+    # ------------------------------------------------------------------
+    # Участники: удаление из чатов и добавление в чаты
+    # ------------------------------------------------------------------
+
+    def _member_op_ready(self) -> bool:
+        """Проверить аккаунт и подготовить события перед операцией с участником."""
+        if not get_current_session():
+            messagebox.showwarning("Участники", "Сначала добавьте аккаунт.")
+            self.members_frame.set_busy(False)
+            return False
+        scan_paused.clear()
+        scan_stop_requested.clear()
+        self._operation_running = True
+        self._pending_switch_session = None
+        return True
+
+    def _on_resolve_user(self, query):
+        if not get_current_session():
+            messagebox.showwarning("Участники", "Сначала добавьте аккаунт.")
+            self.members_frame.set_user_error("Нет активного аккаунта.")
+            return
+        request_queue.put(("resolve_user", query))
+
+    def _on_find_user_chats(self, user_id, deep, include_groups, include_channels):
+        if not self._member_op_ready():
+            return
+        request_queue.put((
+            "find_user_chats", user_id, deep, include_groups, include_channels,
+            scan_paused, scan_stop_requested,
+        ))
+
+    def _on_load_member_chats(self, include_groups, include_channels):
+        if not self._member_op_ready():
+            return
+        request_queue.put((
+            "list_member_chats", include_groups, include_channels,
+            scan_paused, scan_stop_requested,
+        ))
+
+    def _on_remove_user_from_chats(self, user_id, chat_pairs, ban):
+        if not self._member_op_ready():
+            return
+        request_queue.put(("remove_user_from_chats", user_id, chat_pairs, ban))
+
+    def _on_add_user_to_chats(self, user_id, chat_pairs):
+        if not self._member_op_ready():
+            return
+        request_queue.put(("add_user_to_chats", user_id, chat_pairs))
 
     def _open_place(self, place: Place):
         self.places_frame.pack_forget()
@@ -543,6 +625,7 @@ class App:
         self.places = []
         self.places_frame.set_places(self.places)
         self.export_frame.set_dialogs([])
+        self.members_frame.reset()
         if not self._load_and_show_cache(session):
             self.places_frame.status_label.configure(
                 text="Аккаунт: %s. Нажмите «Сканировать» или «Обновить из кэша»." % (get_current_session() or "—")
@@ -799,6 +882,43 @@ class App:
             text=("Список остановлен." if stopped else "Список загружен.") + f" Диалогов: {len(dialogs)}."
         )
 
+    def _handle_user_resolved(self, msg):
+        log.debug("Got user_resolved: %s", msg.user.user_id)
+        self.members_frame.set_user(msg.user)
+
+    def _handle_member_chats_progress(self, msg):
+        short = (msg.title[:40] + "…") if len(msg.title or "") > 40 else (msg.title or "")
+        counter = "%s/%s" % (msg.n, msg.total) if msg.total else str(msg.n)
+        self.members_frame.status_label.configure(text="Проверено чатов: %s. Сейчас: %s" % (counter, short))
+
+    def _handle_member_chat_found(self, msg):
+        self.members_frame.add_found_chat(msg.chat)
+
+    def _handle_member_chats_done(self, msg):
+        log.debug("Got member_chats_done: %s", len(msg.chats))
+        self._operation_running = False
+        self.members_frame.finish_find_chats(msg.chats, msg.stopped)
+
+    def _handle_member_dialogs_progress(self, msg):
+        short = (msg.title[:40] + "…") if len(msg.title or "") > 40 else (msg.title or "")
+        self.members_frame.status_label.configure(text="Загружено чатов: %s. Текущий: %s" % (msg.n, short))
+
+    def _handle_member_dialogs_batch(self, msg):
+        self.members_frame.append_dialogs(msg.batch)
+
+    def _handle_member_dialogs_done(self, msg):
+        log.debug("Got member_dialogs_done: %s", len(msg.dialogs))
+        self._operation_running = False
+        self.members_frame.finish_load_chats(msg.dialogs, msg.stopped)
+
+    def _handle_member_action_progress(self, msg):
+        self.members_frame.update_action_progress(msg.action, msg.current, msg.total, msg.result)
+
+    def _handle_member_action_done(self, msg):
+        log.debug("Got member_action_done: %s, %s чатов", msg.action, len(msg.results))
+        self._operation_running = False
+        self.members_frame.finish_action(msg.action, msg.results, msg.stopped)
+
     def _handle_error(self, msg):
         if isinstance(msg, ErrorMsg):
             op, err = msg.operation, msg.error
@@ -817,6 +937,13 @@ class App:
         if op == "list_export_dialogs":
             self.export_frame.set_loading(False)
             self.export_frame.status_label.configure(text="Ошибка загрузки списка")
+        if op == "resolve_user":
+            # Причина уже видна в карточке пользователя — отдельное окно не нужно.
+            self.members_frame.set_user_error(err)
+            return
+        if op in ("find_user_chats", "list_member_chats", "remove_user_from_chats", "add_user_to_chats"):
+            self.members_frame.set_busy(False)
+            self.members_frame.status_label.configure(text="Ошибка: %s" % err)
         self._operation_running = False
         messagebox.showerror("Ошибка", err)
 
@@ -834,6 +961,9 @@ class App:
             text=f"Telegram просит подождать: {seconds} сек... ({operation})"
         )
         self.export_frame.status_label.configure(
+            text=f"Telegram просит подождать: {seconds} сек..."
+        )
+        self.members_frame.status_label.configure(
             text=f"Telegram просит подождать: {seconds} сек..."
         )
 

@@ -37,6 +37,10 @@ from core import (
     scan_all_dialogs,
     delete_message_ids,
     delete_all_my_in_chat_no_scan,
+    resolve_target_user,
+    find_chats_with_user,
+    remove_user_from_chats,
+    add_user_to_chats,
     get_scan_delay_between_chats,
     get_export_parallel_chats,
     get_export_include_media,
@@ -50,6 +54,9 @@ from ui.messages import (
     DeleteBatchProgressMsg, DeleteBatchDoneMsg, DeleteOpStatusMsg,
     ExportProgressMsg, ExportDoneMsg,
     ExportDialogsProgressMsg, ExportDialogsBatchMsg, ExportDialogsDoneMsg,
+    UserResolvedMsg, MemberChatsProgressMsg, MemberChatFoundMsg, MemberChatsDoneMsg,
+    MemberDialogsProgressMsg, MemberDialogsBatchMsg, MemberDialogsDoneMsg,
+    MemberActionProgressMsg, MemberActionDoneMsg,
     SwitchAccountDoneMsg, LogMsg, ErrorMsg, FloodWaitMsg, ConnectionStatusMsg,
 )
 
@@ -146,15 +153,21 @@ def worker_loop():
                         async def download_avatar():
                             avatar_path = None
                             try:
-                                photos = await app.get_profile_photos(me.id, limit=1)
-                                if photos:
-                                    photo = photos[0]
+                                # get_chat_photos — асинхронный генератор, не корутина со списком.
+                                photo = None
+                                async for item in app.get_chat_photos(me.id, limit=1):
+                                    photo = item
+                                    break
+                                if photo:
                                     temp_dir = os.path.join(_PROJECT_ROOT, "temp")
                                     os.makedirs(temp_dir, exist_ok=True)
                                     avatar_path = os.path.join(temp_dir, f"avatar_{session}_{me.id}.jpg")
                                     await app.download_media(photo.file_id, file_name=avatar_path)
                                     if not os.path.isfile(avatar_path):
                                         avatar_path = None
+                            except (AttributeError, TypeError):
+                                # Так выглядит переезд API Pyrogram: это баг, а не «аватарки нет».
+                                log.exception("worker: не удалось скачать аватар — метод Pyrogram не подошёл")
                             except Exception as av_err:
                                 log.debug("worker: avatar download skip: %s", av_err)
                             if avatar_path:
@@ -317,6 +330,124 @@ def worker_loop():
                                 flush_batch()
                                 response_queue.put(ExportDialogsDoneMsg(dialogs=dialogs, stopped=scan_stop_requested.is_set(), session=session))
                                 log.debug("worker: put export_dialogs_done, dialogs=%s", len(dialogs))
+                            elif req[0] == "resolve_user":
+                                target = await resolve_target_user(req[1])
+                                response_queue.put(UserResolvedMsg(user=target))
+                                log.debug("worker: put user_resolved id=%s", target.user_id)
+                            elif req[0] == "find_user_chats":
+                                await ensure_channels_ready()
+                                user_id = req[1]
+                                deep = bool(req[2])
+                                include_groups = bool(req[3])
+                                include_channels = bool(req[4])
+                                pause_ev = req[5]
+                                stop_ev = req[6]
+
+                                def on_member_chat(mc):
+                                    response_queue.put(MemberChatFoundMsg(chat=mc))
+
+                                def on_member_progress(n, total, title):
+                                    response_queue.put(MemberChatsProgressMsg(n=n, title=title, total=total))
+
+                                def on_member_flood(seconds):
+                                    response_queue.put(FloodWaitMsg(seconds=seconds, operation="find_user_chats"))
+
+                                member_chats = await find_chats_with_user(
+                                    user_id,
+                                    deep=deep,
+                                    include_groups=include_groups,
+                                    include_channels=include_channels,
+                                    pause_event=pause_ev,
+                                    stop_event=stop_ev,
+                                    progress_callback=on_member_chat,
+                                    status_callback=on_member_progress,
+                                    flood_callback=on_member_flood,
+                                )
+                                response_queue.put(MemberChatsDoneMsg(
+                                    chats=member_chats,
+                                    stopped=stop_ev is not None and stop_ev.is_set(),
+                                    session=session,
+                                ))
+                                log.debug("worker: put member_chats_done, chats=%s", len(member_chats))
+                            elif req[0] == "list_member_chats":
+                                include_groups = req[1]
+                                include_channels = req[2]
+                                pause_ev = req[3]
+                                stop_ev = req[4]
+                                member_batch = []
+
+                                def flush_member_batch():
+                                    nonlocal member_batch
+                                    if member_batch:
+                                        response_queue.put(MemberDialogsBatchMsg(batch=member_batch))
+                                        member_batch = []
+
+                                def on_member_dialog(place):
+                                    member_batch.append(place)
+                                    if len(member_batch) >= 50:
+                                        flush_member_batch()
+
+                                def on_member_dialog_progress(n, title):
+                                    response_queue.put(MemberDialogsProgressMsg(n=n, title=title))
+
+                                dialogs = await list_export_dialogs(
+                                    include_groups=include_groups,
+                                    include_channels=include_channels,
+                                    include_private=False,
+                                    pause_event=pause_ev,
+                                    stop_event=stop_ev,
+                                    progress_callback=on_member_dialog,
+                                    dialog_progress_callback=on_member_dialog_progress,
+                                )
+                                flush_member_batch()
+                                response_queue.put(MemberDialogsDoneMsg(
+                                    dialogs=dialogs,
+                                    stopped=stop_ev is not None and stop_ev.is_set(),
+                                    session=session,
+                                ))
+                                log.debug("worker: put member_dialogs_done, dialogs=%s", len(dialogs))
+                            elif req[0] in ("remove_user_from_chats", "add_user_to_chats"):
+                                await ensure_channels_ready()
+                                action = "remove" if req[0] == "remove_user_from_chats" else "add"
+                                user_id = req[1]
+                                chat_pairs = req[2]
+                                ban = bool(req[3]) if len(req) > 3 else True
+
+                                def on_action_progress(i, total, result):
+                                    response_queue.put(MemberActionProgressMsg(
+                                        action=action, current=i, total=total, result=result,
+                                    ))
+
+                                def on_action_flood(seconds):
+                                    response_queue.put(FloodWaitMsg(seconds=seconds, operation=req[0]))
+
+                                # Массовую правку участников нельзя повторять целиком после ошибки,
+                                # поэтому обрабатываем её здесь, а не общим обработчиком ниже.
+                                try:
+                                    if action == "remove":
+                                        action_results = await remove_user_from_chats(
+                                            user_id, chat_pairs, ban=ban,
+                                            pause_event=scan_paused, stop_event=scan_stop_requested,
+                                            progress_callback=on_action_progress,
+                                            flood_callback=on_action_flood,
+                                        )
+                                    else:
+                                        action_results = await add_user_to_chats(
+                                            user_id, chat_pairs,
+                                            pause_event=scan_paused, stop_event=scan_stop_requested,
+                                            progress_callback=on_action_progress,
+                                            flood_callback=on_action_flood,
+                                        )
+                                except Exception as action_err:
+                                    log.exception("worker: %s failed: %s", req[0], action_err)
+                                    response_queue.put(ErrorMsg(operation=req[0], error=str(action_err)))
+                                    action_results = []
+                                response_queue.put(MemberActionDoneMsg(
+                                    action=action,
+                                    results=action_results,
+                                    stopped=scan_stop_requested.is_set(),
+                                ))
+                                log.debug("worker: put member_action_done %s, chats=%s", action, len(action_results))
                         except Exception as e:
                             if FloodWait is not None and isinstance(e, FloodWait):
                                 response_queue.put(FloodWaitMsg(seconds=e.value, operation=req[0]))

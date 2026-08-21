@@ -668,3 +668,431 @@ class TestOwnershipSafety:
         assert deleted == [10]
         assert client.deleted == [10]
         set_app(None)
+
+
+class TestNormalizeUserQuery:
+    """Tests for normalize_user_query."""
+
+    def test_username_with_at(self):
+        from core import normalize_user_query
+        assert normalize_user_query("@durov") == "durov"
+
+    def test_bare_username(self):
+        from core import normalize_user_query
+        assert normalize_user_query("durov") == "durov"
+
+    def test_tme_link(self):
+        from core import normalize_user_query
+        assert normalize_user_query("https://t.me/durov") == "durov"
+        assert normalize_user_query("t.me/@durov") == "durov"
+
+    def test_numeric_id(self):
+        from core import normalize_user_query
+        assert normalize_user_query(" 123456789 ") == 123456789
+
+    def test_phone(self):
+        from core import normalize_user_query
+        assert normalize_user_query("+7 (999) 123-45-67") == "+79991234567"
+
+    def test_chat_id_rejected(self):
+        from core import normalize_user_query
+        with pytest.raises(ValueError):
+            normalize_user_query("-1001234567890")
+
+    def test_empty_rejected(self):
+        from core import normalize_user_query
+        with pytest.raises(ValueError):
+            normalize_user_query("   ")
+
+    def test_garbage_rejected(self):
+        from core import normalize_user_query
+        with pytest.raises(ValueError):
+            normalize_user_query("не имя!")
+
+
+class TestDescribeTelegramError:
+    """Tests for describe_telegram_error."""
+
+    def test_known_error_name(self):
+        from core import describe_telegram_error
+
+        class ChatAdminRequired(Exception):
+            pass
+
+        assert describe_telegram_error(ChatAdminRequired("[400 ...]")) == "Нужны права администратора"
+
+    def test_unknown_error_keeps_text(self):
+        from core import describe_telegram_error
+        text = describe_telegram_error(ValueError("что-то пошло не так"))
+        assert text.startswith("ValueError: ")
+        assert "что-то пошло не так" in text
+
+    def test_long_text_is_trimmed(self):
+        from core import describe_telegram_error, _MAX_ERROR_TEXT
+        text = describe_telegram_error(RuntimeError("x" * 500))
+        assert len(text) <= _MAX_ERROR_TEXT + len("RuntimeError: ")
+
+
+class FakeChatMember:
+    """Минимальный аналог pyrogram.types.ChatMember."""
+
+    class _Status:
+        def __init__(self, name):
+            self.name = name
+
+    class _Privileges:
+        def __init__(self, can_restrict_members):
+            self.can_restrict_members = can_restrict_members
+
+    def __init__(self, status, can_restrict=False):
+        self.status = self._Status(status)
+        self.privileges = self._Privileges(can_restrict)
+
+
+class UserNotParticipant(Exception):
+    """Одноимённая ошибка Pyrogram — код смотрит на имя класса."""
+
+
+class ChatAdminRequired(Exception):
+    pass
+
+
+class UserPrivacyRestricted(Exception):
+    pass
+
+
+class UserAlreadyParticipant(Exception):
+    pass
+
+
+@pytest.fixture
+def no_member_delays(monkeypatch):
+    """Убираем паузы между чатами, чтобы тесты не спали секундами."""
+    import core
+    monkeypatch.setattr(core, "_MEMBER_PROBE_DELAY_MIN", 0)
+    monkeypatch.setattr(core, "_MEMBER_REMOVE_DELAY_MIN", 0)
+    monkeypatch.setattr(core, "_MEMBER_ADD_DELAY_MIN", 0)
+    monkeypatch.setattr(core, "get_delay_sec", lambda: 0)
+
+
+class TestRemoveUserFromChats:
+    """Tests for remove_user_from_chats."""
+
+    @pytest.mark.asyncio
+    async def test_bans_every_selected_chat(self, no_member_delays):
+        from core import remove_user_from_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            def __init__(self):
+                self.banned = []
+                self.unbanned = []
+
+            async def ban_chat_member(self, cid, uid):
+                self.banned.append((cid, uid))
+
+            async def unban_chat_member(self, cid, uid):
+                self.unbanned.append((cid, uid))
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await remove_user_from_chats(777, [(-1001, "Первый"), (-1002, "Второй")], ban=True)
+        finally:
+            set_app(None)
+
+        assert client.banned == [(-1001, 777), (-1002, 777)]
+        assert client.unbanned == []
+        assert [r.ok for r in results] == [True, True]
+        assert results[0].note == "Удалён и забанен"
+
+    @pytest.mark.asyncio
+    async def test_kick_without_ban_unbans_only_channels(self, no_member_delays):
+        from core import remove_user_from_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        supergroup = -1001234567890   # супергруппа/канал
+        basic_group = -4321           # обычная группа: бана там нет
+
+        class FakeClient:
+            def __init__(self):
+                self.unbanned = []
+
+            async def ban_chat_member(self, cid, uid):
+                pass
+
+            async def unban_chat_member(self, cid, uid):
+                self.unbanned.append(cid)
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await remove_user_from_chats(
+                777, [(supergroup, "Супергруппа"), (basic_group, "Группа")], ban=False
+            )
+        finally:
+            set_app(None)
+
+        assert client.unbanned == [supergroup]
+        assert all(r.ok for r in results)
+        assert results[0].note == "Удалён"
+
+    @pytest.mark.asyncio
+    async def test_per_chat_error_does_not_stop_the_rest(self, no_member_delays):
+        from core import remove_user_from_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            def __init__(self):
+                self.banned = []
+
+            async def ban_chat_member(self, cid, uid):
+                if cid == -1001:
+                    raise ChatAdminRequired("[400 CHAT_ADMIN_REQUIRED]")
+                self.banned.append(cid)
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await remove_user_from_chats(777, [(-1001, "Чужой"), (-1002, "Свой")], ban=True)
+        finally:
+            set_app(None)
+
+        assert client.banned == [-1002]
+        assert [r.ok for r in results] == [False, True]
+        assert results[0].note == "Нужны права администратора"
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_target_self(self, no_member_delays):
+        from core import remove_user_from_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 555, "username": "me"})
+        set_app(object())
+        try:
+            with pytest.raises(ValueError):
+                await remove_user_from_chats(555, [(-1001, "Чат")])
+        finally:
+            set_app(None)
+
+    @pytest.mark.asyncio
+    async def test_stop_event_interrupts(self, no_member_delays):
+        import threading
+        from core import remove_user_from_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        stop = threading.Event()
+
+        class FakeClient:
+            def __init__(self):
+                self.banned = []
+
+            async def ban_chat_member(self, cid, uid):
+                self.banned.append(cid)
+                stop.set()
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await remove_user_from_chats(
+                777, [(-1001, "Один"), (-1002, "Два"), (-1003, "Три")], stop_event=stop
+            )
+        finally:
+            set_app(None)
+
+        assert client.banned == [-1001]
+        assert len(results) == 1
+
+
+class TestAddUserToChats:
+    """Tests for add_user_to_chats."""
+
+    @pytest.mark.asyncio
+    async def test_adds_to_every_chat(self, no_member_delays):
+        from core import add_user_to_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            def __init__(self):
+                self.added = []
+
+            async def add_chat_members(self, cid, uid):
+                self.added.append((cid, uid))
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await add_user_to_chats(777, [(-1001, "Первый"), (-1002, "Второй")])
+        finally:
+            set_app(None)
+
+        assert client.added == [(-1001, 777), (-1002, 777)]
+        assert all(r.ok for r in results)
+        assert results[0].note == "Добавлен"
+
+    @pytest.mark.asyncio
+    async def test_already_participant_counts_as_success(self, no_member_delays):
+        from core import add_user_to_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def add_chat_members(self, cid, uid):
+                raise UserAlreadyParticipant("[400 USER_ALREADY_PARTICIPANT]")
+
+        set_app(FakeClient())
+        try:
+            results = await add_user_to_chats(777, [(-1001, "Первый")])
+        finally:
+            set_app(None)
+
+        assert results[0].ok is True
+        assert results[0].note == "Уже в чате"
+
+    @pytest.mark.asyncio
+    async def test_privacy_error_is_reported(self, no_member_delays):
+        from core import add_user_to_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def add_chat_members(self, cid, uid):
+                raise UserPrivacyRestricted("[403 USER_PRIVACY_RESTRICTED]")
+
+        set_app(FakeClient())
+        try:
+            results = await add_user_to_chats(777, [(-1001, "Первый")])
+        finally:
+            set_app(None)
+
+        assert results[0].ok is False
+        assert results[0].note == "Настройки приватности не позволяют добавить"
+
+
+class TestFindChatsWithUser:
+    """Tests for find_chats_with_user (быстрый режим по общим чатам)."""
+
+    @pytest.mark.asyncio
+    async def test_marks_chats_by_my_rights(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeChat:
+            def __init__(self, chat_id, title, chat_type):
+                self.id = chat_id
+                self.title = title
+                self.type = chat_type
+
+        class FakeClient:
+            async def get_common_chats(self, uid):
+                return [
+                    FakeChat(-1001, "Мой чат", ChatType.SUPERGROUP),
+                    FakeChat(-1002, "Чужой чат", ChatType.SUPERGROUP),
+                ]
+
+            async def get_chat_member(self, cid, uid):
+                if uid == "me":
+                    return FakeChatMember("OWNER" if cid == -1001 else "MEMBER")
+                return FakeChatMember("MEMBER")
+
+        set_app(FakeClient())
+        try:
+            found = await find_chats_with_user(777, deep=False)
+        finally:
+            set_app(None)
+
+        by_id = {c.chat_id: c for c in found}
+        assert by_id[-1001].can_manage is True
+        assert by_id[-1001].note == "можно удалить"
+        assert by_id[-1002].can_manage is False
+        assert by_id[-1002].note == "вы не админ"
+
+    @pytest.mark.asyncio
+    async def test_admin_target_is_not_removable(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeChat:
+            id = -1001
+            title = "Чат"
+            type = ChatType.SUPERGROUP
+
+        class FakeClient:
+            async def get_common_chats(self, uid):
+                return [FakeChat()]
+
+            async def get_chat_member(self, cid, uid):
+                if uid == "me":
+                    return FakeChatMember("OWNER")
+                return FakeChatMember("ADMINISTRATOR")
+
+        set_app(FakeClient())
+        try:
+            found = await find_chats_with_user(777, deep=False)
+        finally:
+            set_app(None)
+
+        assert len(found) == 1
+        assert found[0].can_manage is False
+        assert found[0].note == "админ — снимите права"
+
+    @pytest.mark.asyncio
+    async def test_deep_scan_skips_chats_without_the_user(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeChat:
+            def __init__(self, chat_id, title, chat_type):
+                self.id = chat_id
+                self.title = title
+                self.type = chat_type
+
+        class FakeDialog:
+            def __init__(self, chat):
+                self.chat = chat
+
+        class FakeClient:
+            async def get_dialogs(self):
+                for chat in (
+                    FakeChat(-1001, "С ним", ChatType.SUPERGROUP),
+                    FakeChat(-1002, "Без него", ChatType.SUPERGROUP),
+                    FakeChat(555, "Личка", ChatType.PRIVATE),
+                ):
+                    yield FakeDialog(chat)
+
+            async def get_chat_member(self, cid, uid):
+                if uid == "me":
+                    return FakeChatMember("OWNER")
+                if cid == -1002:
+                    raise UserNotParticipant("[400 USER_NOT_PARTICIPANT]")
+                return FakeChatMember("MEMBER")
+
+        set_app(FakeClient())
+        try:
+            found = await find_chats_with_user(777, deep=True)
+        finally:
+            set_app(None)
+
+        assert [c.chat_id for c in found] == [-1001]
+
+
+class TestPyrogramApiContract:
+    """Методы Pyrogram, которые воркер зовёт по имени: переименование должно падать здесь, а не молча в логе."""
+
+    def test_client_exposes_methods_the_worker_calls(self):
+        from pyrogram import Client
+
+        # get_profile_photos переехал в get_chat_photos ещё в Pyrogram 2.x —
+        # промах ловился общим except и оставлял сайдбар без аватарок.
+        for name in ("get_chat_photos", "download_media", "get_dialogs", "get_chat_history",
+                     "get_common_chats", "get_chat_member", "ban_chat_member",
+                     "unban_chat_member", "add_chat_members"):
+            assert hasattr(Client, name), f"Pyrogram больше не отдаёт Client.{name}"

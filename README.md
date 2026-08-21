@@ -18,6 +18,7 @@ Licensed under AGPL-3.0-only.
 - **Multi-account** — switch between Pyrogram sessions on the fly; per-account avatar, profile, and scan cache.
 - **Smart scan** — find only *your* messages across groups, channels, and private chats, with depth limits to keep the API happy.
 - **Safe deletion** — ownership is re-checked right before every delete; batched up to 100 messages per request. Delete by message, by chat, "everything except this one", or skip-scan for huge histories.
+- **Member management** — remove a person from every chat where you have the rights, or add them to the chats you tick. Find them by `@username`, ID, phone, or `t.me` link.
 - **Streaming export** — back up selected chats to `messages.jsonl` + `messages.html` + optional `media/`, with a `manifest.json` summary. Large chats never need to fit in memory.
 - **Background mode** — close the window and TG Deleter keeps running in the **system tray**; reopen or quit from the tray menu. 🐺
 - **Live control** — pause / stop any scan, delete, or export; FloodWait countdowns surface in the status bar.
@@ -61,6 +62,34 @@ system tray and the worker stays connected, so long scans, deletions, and
 exports keep running. Right-click the tray icon for **Открыть** (restore the
 window) or **Выход** (quit for real). The sidebar **Выход** button also quits
 fully.
+
+## Members — remove from chats / add to chats
+
+Open **Участники** in the left sidebar and find the person by `@username`, numeric
+ID, `+phone`, or a `t.me/...` link.
+
+**Удалить из чатов.** Pick how to search:
+
+| Mode | What it does |
+|----|-------------|
+| **Общие чаты (быстро)** | asks Telegram for your chats in common with that person — one request, up to 100 chats |
+| **Все диалоги (долго)** | walks every dialog and checks membership one by one — thorough, but slow and FloodWait-prone |
+
+Every chat found gets a row with the person's status, your status, and whether the
+removal is possible. Chats where you can act are ticked automatically; the rest
+show the reason (no admin rights, target is an admin or the owner) and stay
+unticked — you can still tick them by hand to let Telegram have the final word.
+**Забанить, чтобы не вернулся** is on by default; untick it to kick without a ban,
+so the person can rejoin via an invite link.
+
+**Добавить в чаты.** Click **Загрузить чаты** for all your groups, supergroups, and
+channels, filter or search by title, tick the ones you want, and press **Добавить в
+выбранные**.
+
+Both operations run one chat at a time with a delay, honour Pause / Stop, wait out
+FloodWait, and finish with a per-chat report — including Telegram's reason for
+every chat it refused. Note that adding people is subject to *their* privacy
+settings, and mass invites can get an account limited by Telegram's anti-spam.
 
 ## Export
 
@@ -112,9 +141,9 @@ ui/                CustomTkinter GUI
   app.py           Main window, queue dispatch, tray / background mode
   worker.py        Background asyncio + Pyrogram thread
   tray.py          System-tray icon (pystray)
-  *_frame.py       Screens: chats, posts, export, settings, sidebar
+  *_frame.py       Screens: chats, posts, export, members, settings, sidebar
 assets/            App icon + generator (make_icon.py)
-tests/             pytest suite for core logic
+tests/             pytest suite: core logic + GUI (conftest.py isolates the data dir)
 ```
 
 ## Tests
@@ -124,7 +153,13 @@ pip install -e ".[dev]"
 pytest
 ```
 
-CI runs the suite on Python 3.10 and 3.13 on every push and pull request.
+The suite covers `core.py` logic plus the GUI: the Участники screen and the main
+window's worker-message dispatch. GUI tests need `customtkinter` and a display —
+without either they skip themselves. Nothing in the suite writes to the working
+tree; `tests/conftest.py` points the app's data directory at a temporary folder.
+
+CI runs the suite on Python 3.10 and 3.13 on every push and pull request, under
+`xvfb-run` so the GUI tests execute on Linux too.
 
 ## Privacy & security
 

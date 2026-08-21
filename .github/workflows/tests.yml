@@ -26,12 +26,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      - name: Install system packages for the GUI tests
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           # core.py and the test suite only need pyrogram at import time;
-          # pytest-asyncio drives the async ownership-safety tests.
-          pip install pyrogram pytest pytest-asyncio
+          # pytest-asyncio drives the async ownership-safety tests;
+          # customtkinter + Pillow are needed by the GUI tests, which skip
+          # themselves if Tk cannot open a display.
+          pip install pyrogram pytest pytest-asyncio customtkinter Pillow
 
       - name: Run tests
-        run: pytest -q
+        run: xvfb-run -a pytest -q

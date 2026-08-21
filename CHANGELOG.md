@@ -5,6 +5,51 @@ All notable changes to TG Deleter are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-beta.1] — 2026-08-21
+
+### Added
+- **Участники screen**: find a person by `@username`, numeric ID, phone, or `t.me`
+  link, then act on their chat membership in bulk
+- **Remove from all chats**: discovers every chat you share with that person —
+  fast via Telegram's common-chats list, or a full dialog sweep — checks your
+  admin rights in each, and kicks or bans them from the ones you tick. Rows that
+  you cannot act on (no admin rights, target is an admin or the owner) are
+  labelled with the reason and left unchecked
+- **Add to selected chats**: loads all your groups, supergroups, and channels with
+  checkboxes and title search, then invites the person into everything you tick
+- Per-chat result reporting for both operations: successes and Telegram's refusal
+  reasons (privacy settings, missing rights, member limits) in plain Russian,
+  mirrored into the log panel
+- Pause / Stop, FloodWait countdowns, and inter-chat delays on member operations,
+  matching the scan and export screens
+- Tooltips on the search-scope selector, the ban checkbox, and every chat row
+  (the row tip spells out both sides' status)
+- 100 new tests: core coverage for user-query parsing, error descriptions, rights
+  detection, ban vs. kick semantics and per-chat failure isolation, plus the
+  project's first GUI tests — the Участники screen and the main window's worker
+  message dispatch (166 tests total, up from 66)
+- `tests/conftest.py` redirects `core.get_project_root` to a temporary directory
+  for the whole run, so tests can no longer drop `api_config.json` or caches into
+  the working tree, and hosts the single shared Tk window the GUI tests reuse
+- CI installs customtkinter and runs the suite under `xvfb-run`, so the GUI tests
+  execute on Linux too; they skip themselves when no display is available
+
+### Fixed
+- Sidebar account avatars never loaded: the worker called `get_profile_photos`,
+  which Pyrogram 2.x renamed to `get_chat_photos` *and* turned into an async
+  generator. The resulting `AttributeError` was swallowed by a blanket
+  `except Exception`, leaving only a DEBUG line. Fixed the call, and
+  `AttributeError`/`TypeError` now log at exception level so the next API move
+  is loud instead of silent
+- Added a contract test asserting the Pyrogram `Client` methods the worker calls
+  by name still exist, so a future rename fails in CI
+- Chat rows no longer overflow the status column into the type column; long
+  titles and statuses are ellipsised with the full text in a tooltip
+- Column headers line up with the values under them
+
+### Changed
+- Version aligned to `0.9.0-beta.1` across `VERSION`, `core.py`, `ui/__init__.py`, and `pyproject.toml`
+
 ## [0.8.0-beta.1] — 2026-05-29
 
 ### Added

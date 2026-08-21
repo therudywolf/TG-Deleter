@@ -147,3 +147,60 @@ class FloodWaitMsg(WorkerMsg):
 @dataclass
 class ConnectionStatusMsg(WorkerMsg):
     connected: bool
+
+
+@dataclass
+class UserResolvedMsg(WorkerMsg):
+    user: Any  # TargetUser
+
+
+@dataclass
+class MemberChatsProgressMsg(WorkerMsg):
+    n: int
+    title: str
+    total: int | None = None
+
+
+@dataclass
+class MemberChatFoundMsg(WorkerMsg):
+    chat: Any  # MemberChat
+
+
+@dataclass
+class MemberChatsDoneMsg(WorkerMsg):
+    chats: list
+    stopped: bool
+    session: str
+
+
+@dataclass
+class MemberDialogsProgressMsg(WorkerMsg):
+    n: int
+    title: str
+
+
+@dataclass
+class MemberDialogsBatchMsg(WorkerMsg):
+    batch: list
+
+
+@dataclass
+class MemberDialogsDoneMsg(WorkerMsg):
+    dialogs: list
+    stopped: bool
+    session: str
+
+
+@dataclass
+class MemberActionProgressMsg(WorkerMsg):
+    action: str  # "remove" | "add"
+    current: int
+    total: int
+    result: Any  # MemberActionResult
+
+
+@dataclass
+class MemberActionDoneMsg(WorkerMsg):
+    action: str  # "remove" | "add"
+    results: list
+    stopped: bool
