@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   members too — and reports *people*, not chats: one admin usually covers dozens
   of chats. Each row opens a private chat with that person in one click, and the
   whole list copies to the clipboard as text ready to paste into a message
+- **«Снять бан»**: every member operation is journalled per account, and the
+  third mode replays that journal to show the bans you set and never lifted —
+  tick and undo. Basic groups say plainly that there is no ban to lift there
+- **Retry what failed**: after a run, a button appears offering exactly the
+  chats that did not go through, with the same options as the original attempt
+- **One progress strip** replaces the spinner and the second bar: stage,
+  counter, elapsed time and a linear estimate of what is left, switching from
+  indeterminate to a real bar the moment a total is known
+- **Confirmations that show the work**: the dialog lists every affected chat,
+  and a ban — or any batch over five chats — only proceeds after an explicit
+  acknowledgement
 - Per-chat result reporting for both operations: successes and Telegram's refusal
   reasons (privacy settings, missing rights, member limits) in plain Russian,
   mirrored into the log panel
@@ -36,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/conftest.py` redirects `core.get_project_root` to a temporary directory
   for the whole run, so tests can no longer drop `api_config.json` or caches into
   the working tree, and hosts the single shared Tk window the GUI tests reuse
+- The worker's request/response protocol is covered end to end (4% → 65%): a
+  static contract test asserts every `request_queue.put` name has a branch, and
+  a live harness drives each branch against a fake Telegram client
+- `ruff` runs in CI ahead of the tests
 - CI installs customtkinter and runs the suite under `xvfb-run`, so the GUI tests
   execute on Linux too; they skip themselves when no display is available
 
@@ -72,6 +87,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admins of basic groups are no longer read as having no rights: Pyrogram parses
   them without a `ChatPrivileges` object, which `can_restrict_members` took as a
   "no"
+- **Common chats are no longer capped at 100.** Pyrogram asks `getCommonChats`
+  for a single page and never turns it, so anyone sharing more than a hundred
+  chats was silently truncated. The list is now walked page by page (verified
+  live: a five-per-page walk returns the same set as the library's single call),
+  with a page cap and a fallback to the old path if the raw call ever fails
+- The full sweep starts from the common chats instead of re-checking them:
+  the likely hits show up in the first seconds
 - The member search now reports its stage before it hits the network
   («Спрашиваю Telegram про общие чаты…» → «Общих чатов: N. Проверяю права…»),
   so the screen is never silently busy, and says so when Telegram's

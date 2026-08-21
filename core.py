@@ -1461,6 +1461,8 @@ _MEMBER_REMOVE_DELAY_MIN = 0.5
 _MEMBER_ADD_DELAY_MIN = 1.0
 # Pyrogram запрашивает getCommonChats ровно одной страницей такого размера.
 _COMMON_CHATS_PAGE = 100
+# Предохранитель от бесконечного листания, если сервер поведёт себя неожиданно.
+_COMMON_CHATS_MAX_PAGES = 25
 # Супергруппы и каналы Telegram кодирует как -100…: id = -1000000000000 - channel_id.
 _CHANNEL_ID_BASE = -1000000000000
 
@@ -1794,6 +1796,58 @@ async def resolve_target_user(query: str) -> TargetUser:
     return target
 
 
+async def _fetch_common_chats(
+    client,
+    user_id: int,
+    pause_event=None,
+    stop_event=None,
+    flood_callback=None,
+    page_size: int = _COMMON_CHATS_PAGE,
+) -> list:
+    """
+    Все общие чаты, а не первая сотня.
+
+    client.get_common_chats у pyrogram просит ровно одну страницу и не листает,
+    поэтому ходим в raw-метод сами. Если он почему-то не сработает — откатываемся
+    на библиотечный вызов, чтобы поиск не остался вовсе без списка.
+    """
+    from pyrogram import raw
+    from pyrogram import types as pyro_types
+
+    peer = await _call_with_floodwait(
+        lambda: client.resolve_peer(user_id), pause_event, stop_event, flood_callback=flood_callback,
+    )
+    chats: list = []
+    seen: set[int] = set()
+    max_id = 0
+    for page_no in range(_COMMON_CHATS_MAX_PAGES):
+        response = await _call_with_floodwait(
+            lambda: client.invoke(raw.functions.messages.GetCommonChats(
+                user_id=peer, max_id=max_id, limit=page_size,
+            )),
+            pause_event, stop_event, flood_callback=flood_callback,
+        )
+        page = list(getattr(response, "chats", None) or [])
+        if not page:
+            break
+        fresh = 0
+        for raw_chat in page:
+            parsed = pyro_types.Chat._parse_chat(client, raw_chat)
+            if parsed.id in seen:
+                continue
+            seen.add(parsed.id)
+            chats.append(parsed)
+            fresh += 1
+        # Telegram отдаёт страницу по убыванию id, следующая идёт ниже минимального.
+        raw_ids = [int(getattr(c, "id", 0) or 0) for c in page]
+        next_max = min(raw_ids) if raw_ids else 0
+        log.debug("common chats: страница %s, чатов %s, новых %s", page_no + 1, len(page), fresh)
+        if len(page) < page_size or not fresh or next_max <= 0 or next_max == max_id:
+            break
+        max_id = next_max
+    return chats
+
+
 async def find_chats_with_user(
     user_id: int,
     deep: bool = False,
@@ -1851,12 +1905,41 @@ async def find_chats_with_user(
     try:
         if deep:
             n = 0
-            emit_status(0, None, "Обхожу диалоги…")
+            # Общие чаты Telegram отдаёт сразу — начинаем с них, чтобы находки
+            # появились в первые секунды, а обход не проверял их повторно.
+            emit_status(0, None, "Спрашиваю Telegram про общие чаты…")
+            try:
+                seed = await _common_chats_or_fallback(
+                    client, user_id, pause_event, stop_event, flood_callback,
+                )
+            except _OperationStopped:
+                raise
+            except Exception as e:
+                log.warning("Общие чаты для полного обхода не получены: %s", e)
+                seed = []
+            probed: set[int] = set()
+            for chat in [c for c in seed if wanted(c)]:
+                if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+                    break
+                n += 1
+                title = _chat_title(chat)
+                probed.add(chat.id)
+                emit_status(n, None, title)
+                mc = await _probe_member_chat(
+                    client, chat.id, title, _chat_type_str(chat), user_id, True,
+                    pause_event, stop_event, flood_callback,
+                )
+                if mc:
+                    emit_found(mc)
+                if not await _sleep_responsive(delay, pause_event, stop_event):
+                    break
+
+            emit_status(n, None, "Обхожу остальные диалоги…")
             async for dialog in client.get_dialogs():
                 if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
                     break
                 chat = dialog.chat
-                if not wanted(chat):
+                if not wanted(chat) or chat.id in probed:
                     continue
                 n += 1
                 title = _chat_title(chat)
@@ -1871,21 +1954,13 @@ async def find_chats_with_user(
                     break
         else:
             emit_status(0, None, "Спрашиваю Telegram про общие чаты…")
-            chats = await _call_with_floodwait(
-                lambda: client.get_common_chats(user_id),
-                pause_event, stop_event, flood_callback=flood_callback,
+            chats = await _common_chats_or_fallback(
+                client, user_id, pause_event, stop_event, flood_callback,
             )
-            chats = list(chats or [])
             candidates = [c for c in chats if wanted(c)]
             total = len(candidates)
             log.debug("find_chats_with_user: общих чатов %s, подходящих %s", len(chats), total)
-            if len(chats) >= _COMMON_CHATS_PAGE:
-                # Pyrogram просит getCommonChats одной страницей и не листает дальше.
-                log.warning("Общих чатов вернулось %s — это предел одной страницы", len(chats))
-                emit_status(0, total, "Общих чатов: %s — это предел быстрого поиска. "
-                                      "Остальные ищите полным обходом." % len(chats))
-            else:
-                emit_status(0, total, "Общих чатов: %s. Проверяю права…" % total)
+            emit_status(0, total, "Общих чатов: %s. Проверяю права…" % total)
             for i, chat in enumerate(candidates, 1):
                 if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
                     break
@@ -2434,3 +2509,17 @@ async def unban_user_in_chats(
     _log_member_actions(ACTION_UNBAN, user_id, results)
     log.debug("unban_user_in_chats done: обработано %s из %s", len(results), total)
     return results
+
+
+async def _common_chats_or_fallback(client, user_id, pause_event=None, stop_event=None, flood_callback=None):
+    """Постраничный список общих чатов; при сбое raw-метода — библиотечный вызов."""
+    try:
+        return await _fetch_common_chats(client, user_id, pause_event, stop_event, flood_callback)
+    except _OperationStopped:
+        raise
+    except Exception as e:
+        log.warning("Постраничный getCommonChats не сработал (%s), беру первую страницу", e)
+        chats = await _call_with_floodwait(
+            lambda: client.get_common_chats(user_id), pause_event, stop_event, flood_callback=flood_callback,
+        )
+        return list(chats or [])

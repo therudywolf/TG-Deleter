@@ -1163,30 +1163,16 @@ class TestFindChatsProgress:
         assert "Общих чатов: 3" in summary[2]
 
     @pytest.mark.asyncio
-    async def test_full_page_warns_about_the_limit(self, no_member_delays):
-        from core import find_chats_with_user, set_app, set_me_from_dict, _COMMON_CHATS_PAGE
-        from pyrogram.enums import ChatType
-
-        set_me_from_dict({"id": 1, "username": "me"})
-        events = []
-        set_app(self._client(_COMMON_CHATS_PAGE, ChatType.SUPERGROUP))
-        try:
-            await find_chats_with_user(
-                777, deep=False, status_callback=lambda n, t, title: events.append((n, t, title))
-            )
-        finally:
-            set_app(None)
-
-        summary = [e for e in events if e[0] == 0][-1]
-        assert "предел быстрого поиска" in summary[2]
-
-    @pytest.mark.asyncio
-    async def test_deep_scan_also_announces_itself(self, no_member_delays):
+    async def test_deep_scan_announces_both_stages(self, no_member_delays):
+        # Полный обход сначала берёт общие чаты, потом досматривает остальное.
         from core import find_chats_with_user, set_app, set_me_from_dict
 
         set_me_from_dict({"id": 1, "username": "me"})
 
         class FakeClient:
+            async def get_common_chats(self, uid):
+                return []
+
             async def get_dialogs(self):
                 return
                 yield  # pragma: no cover - пустой асинхронный генератор
@@ -1200,8 +1186,52 @@ class TestFindChatsProgress:
         finally:
             set_app(None)
 
-        assert events and events[0][0] == 0
-        assert "диалог" in events[0][2].lower()
+        stages = [e[2].lower() for e in events if e[0] == 0]
+        assert "общие чаты" in stages[0]
+        assert any("диалог" in st for st in stages)
+
+    @pytest.mark.asyncio
+    async def test_deep_scan_does_not_recheck_common_chats(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeChat:
+            def __init__(self, chat_id):
+                self.id = chat_id
+                self.title = "Чат %s" % chat_id
+                self.type = ChatType.SUPERGROUP
+
+        class FakeDialog:
+            def __init__(self, chat):
+                self.chat = chat
+
+        class FakeClient:
+            def __init__(self):
+                self.member_lookups = []
+
+            async def get_common_chats(self, uid):
+                return [FakeChat(-1001)]
+
+            async def get_dialogs(self):
+                for cid in (-1001, -1002):
+                    yield FakeDialog(FakeChat(cid))
+
+            async def get_chat_member(self, cid, uid):
+                self.member_lookups.append((cid, uid))
+                return FakeChatMember("OWNER" if uid == "me" else "MEMBER")
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            found = await find_chats_with_user(777, deep=True)
+        finally:
+            set_app(None)
+
+        assert sorted(c.chat_id for c in found) == [-1002, -1001]
+        # Общий чат опрошен один раз (свои права + статус цели), а не дважды.
+        assert [c for c, _u in client.member_lookups].count(-1001) == 2
 
 
 class FakeUser:
@@ -1967,3 +1997,134 @@ class TestUnbanUserInChats:
                 await unban_user_in_chats(777, [])
         finally:
             set_app(None)
+
+
+class FakeRawChat:
+    """Сырой чат из ответа Telegram: для листания важен только id."""
+
+    def __init__(self, raw_id):
+        self.id = raw_id
+
+
+class FakePagingClient:
+    """Отдаёт общие чаты страницами по убыванию id, как настоящий сервер."""
+
+    def __init__(self, raw_ids, page_size):
+        self.raw_ids = sorted(raw_ids, reverse=True)
+        self.page_size = page_size
+        self.requests = []
+
+    async def resolve_peer(self, user_id):
+        return "peer-%s" % user_id
+
+    async def invoke(self, request):
+        max_id = int(getattr(request, "max_id", 0) or 0)
+        limit = int(getattr(request, "limit", 0) or 0)
+        self.requests.append((max_id, limit))
+        pool = [i for i in self.raw_ids if max_id == 0 or i < max_id]
+
+        class Response:
+            chats = [FakeRawChat(i) for i in pool[:limit]]
+
+        return Response()
+
+
+@pytest.fixture
+def fake_chat_parser(monkeypatch):
+    """Подменяем разбор сырого чата: проверяем наше листание, а не pyrogram."""
+    from pyrogram import types as pyro_types
+    from pyrogram.enums import ChatType
+
+    class Parsed:
+        def __init__(self, raw_chat):
+            self.id = -1000000000000 - raw_chat.id
+            self.title = "Чат %s" % raw_chat.id
+            self.type = ChatType.SUPERGROUP
+
+    monkeypatch.setattr(pyro_types.Chat, "_parse_chat",
+                        staticmethod(lambda client, raw_chat: Parsed(raw_chat)))
+    return Parsed
+
+
+class TestCommonChatsPaging:
+    """Листание общих чатов: pyrogram просит одну страницу и на этом заканчивает."""
+
+    @pytest.mark.asyncio
+    async def test_collects_every_page(self, fake_chat_parser):
+        from core import _fetch_common_chats
+
+        client = FakePagingClient(range(1, 251), page_size=100)
+        chats = await _fetch_common_chats(client, 777, page_size=100)
+        assert len(chats) == 250
+        assert len({c.id for c in chats}) == 250
+
+    @pytest.mark.asyncio
+    async def test_small_pages_give_the_same_result(self, fake_chat_parser):
+        from core import _fetch_common_chats
+
+        big = await _fetch_common_chats(FakePagingClient(range(1, 44), 100), 777, page_size=100)
+        small = await _fetch_common_chats(FakePagingClient(range(1, 44), 5), 777, page_size=5)
+        assert {c.id for c in big} == {c.id for c in small}
+
+    @pytest.mark.asyncio
+    async def test_continues_below_the_smallest_id_seen(self, fake_chat_parser):
+        from core import _fetch_common_chats
+
+        client = FakePagingClient(range(1, 11), page_size=4)
+        await _fetch_common_chats(client, 777, page_size=4)
+        assert client.requests[0][0] == 0
+        assert client.requests[1][0] == 7
+        assert client.requests[2][0] == 3
+
+    @pytest.mark.asyncio
+    async def test_short_page_ends_the_walk(self, fake_chat_parser):
+        from core import _fetch_common_chats
+
+        client = FakePagingClient(range(1, 4), page_size=100)
+        await _fetch_common_chats(client, 777, page_size=100)
+        assert len(client.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_common_chats_no_extra_requests(self, fake_chat_parser):
+        from core import _fetch_common_chats
+
+        client = FakePagingClient([], page_size=100)
+        assert await _fetch_common_chats(client, 777, page_size=100) == []
+        assert len(client.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_server_that_repeats_itself_cannot_loop_forever(self, fake_chat_parser):
+        from core import _fetch_common_chats, _COMMON_CHATS_MAX_PAGES
+
+        class StuckClient(FakePagingClient):
+            async def invoke(self, request):
+                self.requests.append((0, self.page_size))
+
+                class Response:
+                    chats = [FakeRawChat(i) for i in range(1, 6)]
+
+                return Response()
+
+        client = StuckClient(range(1, 6), page_size=5)
+        chats = await _fetch_common_chats(client, 777, page_size=5)
+        assert len(chats) == 5
+        assert len(client.requests) < _COMMON_CHATS_MAX_PAGES
+
+    @pytest.mark.asyncio
+    async def test_broken_raw_call_falls_back_to_the_library(self, no_member_delays):
+        from core import _common_chats_or_fallback
+
+        class FallbackClient:
+            def __init__(self):
+                self.used_fallback = False
+
+            async def resolve_peer(self, user_id):
+                raise RuntimeError("raw недоступен")
+
+            async def get_common_chats(self, user_id):
+                self.used_fallback = True
+                return ["чат"]
+
+        client = FallbackClient()
+        assert await _common_chats_or_fallback(client, 777) == ["чат"]
+        assert client.used_fallback is True

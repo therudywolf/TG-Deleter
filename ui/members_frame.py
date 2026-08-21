@@ -175,6 +175,8 @@ class MembersFrame(ctk.CTkFrame):
         self._paused = False
         self._search_job = None
         self._admins_chats = 0
+        self._failed = []          # чаты, где операция не прошла
+        self._last_action = None   # ("remove"|"add"|"unban", ban_flag)
         # Свои списки и выбор для каждого режима, чтобы переключение их не сбрасывало.
         self._items = {mode: [] for mode in MODES}
         self._selected = {mode: set() for mode in MODES}
@@ -302,6 +304,15 @@ class MembersFrame(ctk.CTkFrame):
             self.actions, text="Снять бан в выбранных", command=self._unban_selected, corner_radius=BTN_RADIUS,
             width=200, height=36, fg_color=BTN_SECONDARY, state="disabled",
         )
+        self.retry_btn = ctk.CTkButton(
+            self.actions, text="Повторить неудачные", command=self._retry_failed,
+            corner_radius=BTN_RADIUS, width=190, height=36, fg_color=BTN_SECONDARY,
+        )
+        bind_tooltip(
+            self.retry_btn,
+            "Повторит ровно те чаты, где в прошлый раз не вышло. "
+            "Полезно, когда права появились или Telegram притормаживал.",
+        )
         self.pause_btn = ctk.CTkButton(
             self.actions, text="Пауза", command=self._toggle_pause, corner_radius=BTN_RADIUS,
             width=100, height=36, state="disabled",
@@ -414,7 +425,8 @@ class MembersFrame(ctk.CTkFrame):
         options.pack(fill="x", after=self.mode_switch)
         # Кнопки пакуются справа налево, поэтому порядок задаём заново на каждом переключении.
         for btn in (self.find_chats_btn, self.remove_btn, self.admins_btn, self.load_chats_btn,
-                    self.add_btn, self.load_bans_btn, self.unban_btn, self.pause_btn, self.stop_btn):
+                    self.add_btn, self.load_bans_btn, self.unban_btn, self.retry_btn,
+                    self.pause_btn, self.stop_btn):
             btn.pack_forget()
         order = {
             MODE_REMOVE: [self.find_chats_btn, self.remove_btn, self.admins_btn],
@@ -428,6 +440,7 @@ class MembersFrame(ctk.CTkFrame):
         self._sync_buttons()
 
     def _sync_buttons(self):
+        self._sync_retry_button()
         if self._busy:
             return
         has_user = self.target is not None
@@ -437,6 +450,47 @@ class MembersFrame(ctk.CTkFrame):
         self.add_btn.configure(state="normal" if has_user and selected else "disabled")
         self.admins_btn.configure(state="normal" if self._chats_without_rights() else "disabled")
         self.unban_btn.configure(state="normal" if selected and self.mode == MODE_UNBAN else "disabled")
+
+    def _sync_retry_button(self):
+        """Кнопка повтора появляется, только когда есть что повторять."""
+        show = bool(self._failed) and not self._busy
+        if show:
+            self.retry_btn.configure(
+                state="normal", text="Повторить неудачные (%s)" % len(self._failed),
+            )
+            # winfo_ismapped зависит от предков; winfo_manager честно говорит,
+            # управляет ли кнопкой пакер прямо сейчас.
+            if not self.retry_btn.winfo_manager():
+                self.retry_btn.pack(side="right", padx=PAD_SM)
+        else:
+            self.retry_btn.pack_forget()
+
+    def _retry_failed(self):
+        if self._busy or not self._failed or not self._last_action:
+            return
+        action, ban = self._last_action
+        if not self.target:
+            messagebox.showinfo("Участники", "Сначала найдите человека.")
+            return
+        pairs = list(self._failed)
+        verb = {"remove": "Повторить удаление", "add": "Повторить добавление",
+                "unban": "Повторить снятие бана"}.get(action, "Повторить")
+        if not confirm_action(
+            self.winfo_toplevel(), "Повтор", "%s в %s чат(ах)?" % (verb, len(pairs)),
+            items=[t for _cid, t in pairs],
+            note="В прошлый раз здесь не получилось. Причины видны в списке.",
+            danger=action == "remove",
+            confirm_text="Повторить",
+        ):
+            return
+        self._start_action({"remove": "Удаляю", "add": "Добавляю", "unban": "Снимаю бан"}[action],
+                           len(pairs))
+        if action == "remove":
+            self.on_remove(self.target.user_id, pairs, ban)
+        elif action == "add":
+            self.on_add(self.target.user_id, pairs)
+        else:
+            self.on_unban(self.target.user_id, pairs)
 
     # ------------------------------------------------------------------
     # Запуск операций
@@ -529,6 +583,7 @@ class MembersFrame(ctk.CTkFrame):
             ack_text=ack, confirm_text="Удалить" if not ban else "Удалить и забанить",
         ):
             return
+        self._last_action = ("remove", ban)
         self._start_action("Удаляю", len(pairs))
         self.on_remove(self.target.user_id, pairs, ban)
 
@@ -549,6 +604,7 @@ class MembersFrame(ctk.CTkFrame):
             ack_text=ack, confirm_text="Добавить",
         ):
             return
+        self._last_action = ("add", False)
         self._start_action("Добавляю", len(pairs))
         self.on_add(self.target.user_id, pairs)
 
@@ -575,10 +631,12 @@ class MembersFrame(ctk.CTkFrame):
             confirm_text="Снять бан",
         ):
             return
+        self._last_action = ("unban", False)
         self._start_action("Снимаю бан", len(pairs))
         self.on_unban(target_id, pairs)
 
     def _start_action(self, stage, total):
+        self._failed = []
         scan_paused.clear()
         scan_stop_requested.clear()
         self._results = {}
@@ -748,6 +806,7 @@ class MembersFrame(ctk.CTkFrame):
             return
         ok = sum(1 for r in results if r.ok)
         failed = len(results) - ok
+        self._failed = [(r.chat_id, r.title) for r in results if not r.ok]
         if action == "remove":
             done_ids = {r.chat_id for r in results if r.ok}
             self._items[MODE_REMOVE] = [c for c in self._items[MODE_REMOVE] if c.chat_id not in done_ids]
@@ -776,6 +835,8 @@ class MembersFrame(ctk.CTkFrame):
         self._selected = {mode: set() for mode in MODES}
         self._results = {}
         self._admins_chats = 0
+        self._failed = []
+        self._last_action = None
         self.set_busy(False)
         self.progress.hide()
         self.user_label.configure(

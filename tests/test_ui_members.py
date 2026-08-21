@@ -742,3 +742,85 @@ class TestUnbanMode:
         packed = list(frame.actions.pack_slaves())
         assert frame.load_bans_btn in packed and frame.unban_btn in packed
         assert frame.find_chats_btn not in packed and frame.add_btn not in packed
+
+
+class TestRetryFailed:
+    """Повтор ровно тех чатов, где не вышло."""
+
+    def _run_remove(self, frame, results):
+        from core import MemberActionResult
+
+        frame.set_user(TARGET)
+        frame.finish_find_chats([make_chat(cid, title) for cid, title, _ok in results], stopped=False)
+        frame._remove_selected()
+        frame.finish_action("remove", [
+            MemberActionResult(cid, title, ok, "Удалён" if ok else "Нужны права администратора")
+            for cid, title, ok in results
+        ], stopped=False)
+        frame.update()
+
+    @staticmethod
+    def _packed(frame):
+        return frame.retry_btn in list(frame.actions.pack_slaves())
+
+    def test_button_hidden_while_nothing_failed(self, frame):
+        assert not self._packed(frame)
+        self._run_remove(frame, [(-1001, "Ушёл", True)])
+        assert not self._packed(frame)
+
+    def test_button_appears_with_a_count(self, frame):
+        self._run_remove(frame, [(-1001, "Ушёл", True), (-1002, "Остался", False),
+                                 (-1003, "Тоже остался", False)])
+        assert self._packed(frame)
+        assert frame.retry_btn.cget("text") == "Повторить неудачные (2)"
+
+    def test_retry_sends_only_the_failures(self, frame):
+        self._run_remove(frame, [(-1001, "Ушёл", True), (-1002, "Остался", False)])
+        frame.rec.remove.clear()
+        frame._retry_failed()
+        assert frame.rec.remove == [(777, [(-1002, "Остался")], True)]
+
+    def test_retry_keeps_the_ban_flag(self, frame):
+        frame.ban_var.set(False)
+        self._run_remove(frame, [(-1002, "Остался", False)])
+        frame.rec.remove.clear()
+        frame._retry_failed()
+        assert frame.rec.remove[0][2] is False
+
+    def test_retry_can_be_declined(self, frame):
+        self._run_remove(frame, [(-1002, "Остался", False)])
+        frame.rec.remove.clear()
+        frame.confirm.answer = False
+        frame._retry_failed()
+        assert frame.rec.remove == []
+
+    def test_new_operation_clears_the_old_failures(self, frame):
+        self._run_remove(frame, [(-1002, "Остался", False)])
+        assert frame._failed
+        frame._start_action("Удаляю", 1)
+        assert frame._failed == []
+        frame.set_busy(False)
+
+    def test_retry_works_for_adding_too(self, frame):
+        from core import MemberActionResult, Place
+
+        frame.set_user(TARGET)
+        frame.mode_switch.set(MODE_ADD)
+        frame._on_mode_change(MODE_ADD)
+        frame.finish_load_chats([Place(chat_id=-2001, title="Канал", type_str="Канал")], stopped=False)
+        frame._set_visible_checks(True)
+        frame._add_selected()
+        frame.finish_action("add", [
+            MemberActionResult(-2001, "Канал", False, "Настройки приватности не позволяют добавить"),
+        ], stopped=False)
+        frame.rec.add.clear()
+        frame._retry_failed()
+        assert frame.rec.add == [(777, [(-2001, "Канал")])]
+
+    def test_reset_forgets_the_failures(self, frame):
+        self._run_remove(frame, [(-1002, "Остался", False)])
+        frame.reset()
+        frame.update()
+        assert frame._failed == []
+        assert frame._last_action is None
+        assert not self._packed(frame)

@@ -72,8 +72,8 @@ ID, `+phone`, or a `t.me/...` link.
 
 | Mode | What it does |
 |----|-------------|
-| **Общие чаты (быстро)** | asks Telegram for your chats in common with that person — one request, up to 100 chats |
-| **Все диалоги (долго)** | walks every dialog and checks membership one by one — thorough, but slow and FloodWait-prone |
+| **Общие чаты (быстро)** | asks Telegram for your chats in common with that person, walking every page |
+| **Все диалоги (долго)** | starts from the common chats, then walks every remaining dialog — thorough, but slow and FloodWait-prone |
 
 Every chat found gets a row with the person's status, your status, and whether the
 removal is possible. Chats where you can act are ticked automatically; the rest
@@ -89,6 +89,16 @@ reports *people* rather than chats — one admin typically covers dozens of them
 Every row opens a private chat with that person in one click, and
 **Копировать список** puts the whole thing on the clipboard as text you can
 paste straight into a message.
+
+**Снять бан.** Every removal and invite is written to a per-account journal, so
+this mode can list the bans you set and never lifted and undo them. With nobody
+selected it shows every ban still standing, whose it is and when it happened.
+(There is no ban to lift in a basic group — the row says so.)
+
+Whatever the mode, the confirmation lists the affected chats in full, a ban or
+any batch over five chats needs an explicit acknowledgement, one strip shows the
+stage, counter, elapsed time and estimate, and anything that failed can be
+retried on its own with one button.
 
 **Добавить в чаты.** Click **Загрузить чаты** for all your groups, supergroups, and
 channels, filter or search by title, tick the ones you want, and press **Добавить в
@@ -151,6 +161,8 @@ ui/                CustomTkinter GUI
   tray.py          System-tray icon (pystray)
   *_frame.py       Screens: chats, posts, export, members, settings, sidebar
   admins_dialog.py Who-can-remove window with one-click links to their DMs
+  confirm_dialog.py Confirmation that lists the affected chats
+  progress_strip.py Stage, counter, elapsed time and estimate in one strip
 assets/            App icon + generator (make_icon.py)
 tests/             pytest suite: core logic + GUI (conftest.py isolates the data dir)
 ```
