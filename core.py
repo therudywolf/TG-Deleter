@@ -37,7 +37,6 @@ from pathlib import Path
 from types import MappingProxyType
 
 from pyrogram import Client
-from pyrogram import utils as pyro_utils
 from pyrogram.errors import FloodWait
 from pyrogram.enums import ChatType
 
@@ -1487,6 +1486,8 @@ _MEMBER_REMOVE_DELAY_MIN = 0.5
 _MEMBER_ADD_DELAY_MIN = 1.0
 # Pyrogram запрашивает getCommonChats ровно одной страницей такого размера.
 _COMMON_CHATS_PAGE = 100
+# Супергруппы и каналы Telegram кодирует как -100…: id = -1000000000000 - channel_id.
+_CHANNEL_ID_BASE = -1000000000000
 
 _USERNAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,31}")
 _TME_LINK_RE = re.compile(
@@ -1579,6 +1580,7 @@ class MemberChat:
     my_status: str = "unknown"       # owner / administrator / member / left / banned / unknown
     target_status: str = "unknown"   # owner / administrator / member / restricted / absent / unknown
     can_manage: bool = False
+    invited_by_me: bool = False      # обычная группа: позвали его мы, значит можем и выгнать
     note: str = ""
 
 
@@ -1621,23 +1623,39 @@ def _member_status_key(member) -> str:
     return str(getattr(status, "name", status) or "").lower()
 
 
-def _can_restrict_members(member) -> bool:
+def _can_restrict_members(member, basic_group: bool = False) -> bool:
     """Может ли текущий аккаунт удалять участников — по своему членству в чате."""
     key = _member_status_key(member)
     if key == "owner":
         return True
     if key == "administrator":
         privileges = getattr(member, "privileges", None)
+        if privileges is None:
+            # В обычной группе у админа нет отдельного набора прав: админ — значит может.
+            return bool(basic_group)
         return bool(getattr(privileges, "can_restrict_members", False))
     return False
 
 
 def _peer_kind(chat_id) -> str:
-    """«chat» — обычная группа, «channel» — супергруппа или канал, «user» — личка."""
+    """
+    «chat» — обычная группа, «channel» — супергруппа или канал, «user» — личка.
+
+    Считаем по способу кодирования id, а не через pyrogram.utils.get_peer_type:
+    там зашит 32-битный предел для обычных групп, а Telegram давно выдаёт им
+    id крупнее и библиотека на таких падает с ValueError.
+    """
     try:
-        return pyro_utils.get_peer_type(int(chat_id))
-    except (ValueError, TypeError):
+        cid = int(chat_id)
+    except (TypeError, ValueError):
         return "unknown"
+    if cid > 0:
+        return "user"
+    if cid <= _CHANNEL_ID_BASE:
+        return "channel"
+    if cid < 0:
+        return "chat"
+    return "unknown"
 
 
 async def _call_with_floodwait(factory, pause_event=None, stop_event=None, attempts=4, flood_callback=None):
@@ -1683,7 +1701,7 @@ def _fill_member_note(mc: MemberChat) -> MemberChat:
         else:
             mc.note = "вы не админ"
     else:
-        mc.note = "можно удалить"
+        mc.note = "вы пригласили" if mc.invited_by_me else "можно удалить"
     return mc
 
 
@@ -1705,19 +1723,25 @@ async def _probe_member_chat(
     Возвращает None, если цели в чате нет или список участников нам не виден.
     """
     mc = MemberChat(chat_id=chat_id, title=title, type_str=type_str)
+    basic_group = _peer_kind(chat_id) == "chat"
+
+    async def fetch(who):
+        return await _call_with_floodwait(
+            lambda: client.get_chat_member(chat_id, who),
+            pause_event, stop_event, flood_callback=flood_callback,
+        )
+
+    target_member = None
     if not assume_member:
         try:
-            member = await _call_with_floodwait(
-                lambda: client.get_chat_member(chat_id, target_user_id),
-                pause_event, stop_event, flood_callback=flood_callback,
-            )
+            target_member = await fetch(target_user_id)
         except _OperationStopped:
             raise
         except Exception as e:
             # UserNotParticipant — цели нет; остальное обычно значит «участников нам не видно».
             log.debug("Проверка участия в чате %s: %s", chat_id, e)
             return None
-        status = _member_status_key(member)
+        status = _member_status_key(target_member)
         if status in ("left", "banned"):
             return None
         mc.target_status = status or "member"
@@ -1725,25 +1749,20 @@ async def _probe_member_chat(
         mc.target_status = "member"
 
     try:
-        me_member = await _call_with_floodwait(
-            lambda: client.get_chat_member(chat_id, "me"),
-            pause_event, stop_event, flood_callback=flood_callback,
-        )
+        me_member = await fetch("me")
     except _OperationStopped:
         raise
     except Exception as e:
         mc.note = describe_telegram_error(e)
         return _fill_member_note(mc)
     mc.my_status = _member_status_key(me_member) or "unknown"
-    mc.can_manage = _can_restrict_members(me_member)
+    mc.can_manage = _can_restrict_members(me_member, basic_group)
 
-    # В быстром режиме уточняем статус цели, только если удалять её вообще можем.
-    if assume_member and mc.can_manage:
+    # Карточка цели нужна, если удалять её можем (вдруг она админ) либо если это
+    # обычная группа — там решает, кто её пригласил.
+    if target_member is None and (mc.can_manage or basic_group):
         try:
-            member = await _call_with_floodwait(
-                lambda: client.get_chat_member(chat_id, target_user_id),
-                pause_event, stop_event, flood_callback=flood_callback,
-            )
+            target_member = await fetch(target_user_id)
         except _OperationStopped:
             raise
         except Exception as e:
@@ -1751,12 +1770,20 @@ async def _probe_member_chat(
                 return None
             log.debug("Уточнение статуса в чате %s: %s", chat_id, e)
         else:
-            status = _member_status_key(member)
+            status = _member_status_key(target_member)
             if status in ("left", "banned"):
                 return None
             mc.target_status = status or "member"
-    return _fill_member_note(mc)
 
+    # В обычной группе выгнать можно того, кого сам и позвал, даже без прав админа.
+    # В супергруппах такого правила нет, и Telegram там даже не говорит, кто кого привёл.
+    if basic_group and not mc.can_manage and mc.target_status == "member":
+        my_id = state.get_user_id()
+        inviter = getattr(target_member, "invited_by", None)
+        if inviter is not None and my_id is not None and getattr(inviter, "id", None) == int(my_id):
+            mc.invited_by_me = True
+            mc.can_manage = True
+    return _fill_member_note(mc)
 
 async def resolve_target_user(query: str) -> TargetUser:
     """Найти пользователя по @username, числовому ID, телефону или ссылке t.me."""

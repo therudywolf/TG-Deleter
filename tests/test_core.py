@@ -1206,3 +1206,213 @@ class TestFindChatsProgress:
 
         assert events and events[0][0] == 0
         assert "диалог" in events[0][2].lower()
+
+
+class FakeUser:
+    def __init__(self, user_id):
+        self.id = user_id
+
+
+class TestBasicGroupRights:
+    """Обычная группа живёт по своим правилам: там решает не только админка."""
+
+    BASIC = -4321               # обычная группа
+    SUPER = -1001234567890      # супергруппа
+
+    @staticmethod
+    def _client(chat_id, my_member, target_member):
+        from pyrogram.enums import ChatType
+
+        class FakeChat:
+            id = chat_id
+            title = "Чат"
+            type = ChatType.GROUP if chat_id == TestBasicGroupRights.BASIC else ChatType.SUPERGROUP
+
+        class FakeClient:
+            def __init__(self):
+                self.member_calls = []
+
+            async def get_common_chats(self, uid):
+                return [FakeChat()]
+
+            async def get_chat_member(self, cid, uid):
+                self.member_calls.append(uid)
+                return my_member if uid == "me" else target_member
+
+        return FakeClient()
+
+    async def _probe(self, chat_id, my_member, target_member, my_id=1):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": my_id, "username": "me"})
+        client = self._client(chat_id, my_member, target_member)
+        set_app(client)
+        try:
+            found = await find_chats_with_user(777, deep=False)
+        finally:
+            set_app(None)
+        return (found[0] if found else None), client
+
+    @pytest.mark.asyncio
+    async def test_member_can_remove_whom_they_invited(self, no_member_delays):
+        # Обычная группа: прав админа нет, но привёл человека я — Telegram даст выгнать.
+        target = FakeChatMember("MEMBER")
+        target.invited_by = FakeUser(1)
+        mc, _ = await self._probe(self.BASIC, FakeChatMember("MEMBER"), target)
+        assert mc.can_manage is True
+        assert mc.invited_by_me is True
+        assert mc.note == "вы пригласили"
+
+    @pytest.mark.asyncio
+    async def test_member_cannot_remove_someone_elses_invite(self, no_member_delays):
+        target = FakeChatMember("MEMBER")
+        target.invited_by = FakeUser(999)
+        mc, _ = await self._probe(self.BASIC, FakeChatMember("MEMBER"), target)
+        assert mc.can_manage is False
+        assert mc.invited_by_me is False
+        assert mc.note == "вы не админ"
+
+    @pytest.mark.asyncio
+    async def test_missing_inviter_is_not_a_permission(self, no_member_delays):
+        mc, _ = await self._probe(self.BASIC, FakeChatMember("MEMBER"), FakeChatMember("MEMBER"))
+        assert mc.can_manage is False
+
+    @pytest.mark.asyncio
+    async def test_basic_group_admin_has_no_privileges_object(self, no_member_delays):
+        # Pyrogram отдаёт админа обычной группы без ChatPrivileges — раньше это
+        # читалось как «прав нет».
+        me = FakeChatMember("ADMINISTRATOR")
+        me.privileges = None
+        mc, _ = await self._probe(self.BASIC, me, FakeChatMember("MEMBER"))
+        assert mc.can_manage is True
+        assert mc.note == "можно удалить"
+
+    @pytest.mark.asyncio
+    async def test_supergroup_admin_without_ban_right_still_cannot(self, no_member_delays):
+        me = FakeChatMember("ADMINISTRATOR", can_restrict=False)
+        mc, _ = await self._probe(self.SUPER, me, FakeChatMember("MEMBER"))
+        assert mc.can_manage is False
+        assert mc.note == "нет права банить"
+
+    @pytest.mark.asyncio
+    async def test_invite_rule_does_not_apply_to_supergroups(self, no_member_delays):
+        # В супергруппе «я его привёл» ничего не даёт, и Telegram эти данные не отдаёт.
+        target = FakeChatMember("MEMBER")
+        target.invited_by = FakeUser(1)
+        mc, _ = await self._probe(self.SUPER, FakeChatMember("MEMBER"), target)
+        assert mc.can_manage is False
+        assert mc.invited_by_me is False
+
+    @pytest.mark.asyncio
+    async def test_admin_target_is_untouchable_even_if_i_invited_them(self, no_member_delays):
+        target = FakeChatMember("ADMINISTRATOR")
+        target.invited_by = FakeUser(1)
+        mc, _ = await self._probe(self.BASIC, FakeChatMember("MEMBER"), target)
+        assert mc.can_manage is False
+        assert mc.note == "админ — снимите права"
+
+    @pytest.mark.asyncio
+    async def test_basic_group_costs_one_extra_lookup(self, no_member_delays):
+        # Ради inviter_id приходится спросить карточку цели даже без прав админа.
+        target = FakeChatMember("MEMBER")
+        target.invited_by = FakeUser(1)
+        _, client = await self._probe(self.BASIC, FakeChatMember("MEMBER"), target)
+        assert client.member_calls == ["me", 777]
+
+    @pytest.mark.asyncio
+    async def test_supergroup_without_rights_costs_one_lookup(self, no_member_delays):
+        _, client = await self._probe(self.SUPER, FakeChatMember("MEMBER"), FakeChatMember("MEMBER"))
+        assert client.member_calls == ["me"]
+
+
+class TestPeerKind:
+    """Классификация чата по id: pyrogram здесь врёт на современных id."""
+
+    def test_modern_basic_group(self):
+        from core import _peer_kind
+        # Реальный id обычной группы, на котором pyrogram.utils.get_peer_type падает:
+        # его MIN_CHAT_ID = -2147483647 остался 32-битным.
+        assert _peer_kind(-4614472266) == "chat"
+
+    def test_old_basic_group(self):
+        from core import _peer_kind
+        assert _peer_kind(-915994800) == "chat"
+
+    def test_supergroup(self):
+        from core import _peer_kind
+        assert _peer_kind(-1001234567890) == "channel"
+
+    def test_supergroup_beyond_the_32bit_range(self):
+        from core import _peer_kind
+        assert _peer_kind(-1002500000000) == "channel"
+
+    def test_user(self):
+        from core import _peer_kind
+        assert _peer_kind(127163336) == "user"
+
+    def test_garbage(self):
+        from core import _peer_kind
+        assert _peer_kind(None) == "unknown"
+        assert _peer_kind("не число") == "unknown"
+
+    def test_pyrogram_would_have_failed_here(self):
+        # Страховка: если библиотека однажды починит границы, тест напомнит,
+        # что наш обход можно упростить.
+        from pyrogram import utils
+        with pytest.raises(ValueError):
+            utils.get_peer_type(-4614472266)
+
+
+class TestKickUsesTheRightPeerKind:
+    """Бан снимаем только там, где он ставится, — и на новых id тоже."""
+
+    @pytest.mark.asyncio
+    async def test_unban_runs_for_a_modern_supergroup(self, no_member_delays):
+        from core import remove_user_from_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            def __init__(self):
+                self.unbanned = []
+
+            async def ban_chat_member(self, cid, uid):
+                pass
+
+            async def unban_chat_member(self, cid, uid):
+                self.unbanned.append(cid)
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            await remove_user_from_chats(777, [(-1002500000000, "Новая супергруппа")], ban=False)
+        finally:
+            set_app(None)
+
+        assert client.unbanned == [-1002500000000]
+
+    @pytest.mark.asyncio
+    async def test_no_unban_for_a_modern_basic_group(self, no_member_delays):
+        from core import remove_user_from_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            def __init__(self):
+                self.unbanned = []
+
+            async def ban_chat_member(self, cid, uid):
+                pass
+
+            async def unban_chat_member(self, cid, uid):
+                self.unbanned.append(cid)
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await remove_user_from_chats(777, [(-4614472266, "Обычная группа")], ban=False)
+        finally:
+            set_app(None)
+
+        assert client.unbanned == []
+        assert results[0].ok is True and results[0].note == "Удалён"

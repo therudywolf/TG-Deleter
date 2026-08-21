@@ -24,10 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching the scan and export screens
 - Tooltips on the search-scope selector, the ban checkbox, and every chat row
   (the row tip spells out both sides' status)
-- 106 new tests: core coverage for user-query parsing, error descriptions, rights
+- 124 new tests: core coverage for user-query parsing, error descriptions, rights
   detection, ban vs. kick semantics and per-chat failure isolation, plus the
   project's first GUI tests — the Участники screen and the main window's worker
-  message dispatch (172 tests total, up from 66)
+  message dispatch (190 tests total, up from 66)
 - `tests/conftest.py` redirects `core.get_project_root` to a temporary directory
   for the whole run, so tests can no longer drop `api_config.json` or caches into
   the working tree, and hosts the single shared Tk window the GUI tests reuse
@@ -52,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewritten. On a busy account that is minutes of silence before the first
   scan, delete, export, or member search of a session. The dead prefetch is
   gone from the worker (`fetch_and_set_my_channels` stays for the CLI)
+- **Chat ids past 2^31 were classified as "unknown".** `pyrogram.utils.get_peer_type`
+  still bounds basic groups by the 32-bit `MIN_CHAT_ID` and raises `ValueError`
+  on the larger ids Telegram now hands out, so a real group with id
+  `-4614472266` fell through every type check. Peer kind is now derived from
+  Telegram's own `-100…` encoding instead. This also means a plain kick from a
+  modern supergroup actually lifts the ban afterwards, rather than silently
+  leaving the person banned
+- **Removal is now offered in basic groups where you invited the person.**
+  Telegram lets any member of a regular group remove whoever they brought in,
+  and reports `inviter_id` for exactly that reason; the screen marks such rows
+  «вы пригласили» and ticks them. (Supergroups have no such rule — Telegram does
+  not even expose who invited a plain member there.)
+- Admins of basic groups are no longer read as having no rights: Pyrogram parses
+  them without a `ChatPrivileges` object, which `can_restrict_members` took as a
+  "no"
 - The member search now reports its stage before it hits the network
   («Спрашиваю Telegram про общие чаты…» → «Общих чатов: N. Проверяю права…»),
   so the screen is never silently busy, and says so when Telegram's
