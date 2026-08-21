@@ -1485,6 +1485,8 @@ _MAX_ERROR_TEXT = 120
 _MEMBER_PROBE_DELAY_MIN = 0.3
 _MEMBER_REMOVE_DELAY_MIN = 0.5
 _MEMBER_ADD_DELAY_MIN = 1.0
+# Pyrogram запрашивает getCommonChats ровно одной страницей такого размера.
+_COMMON_CHATS_PAGE = 100
 
 _USERNAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,31}")
 _TME_LINK_RE = re.compile(
@@ -1847,6 +1849,7 @@ async def find_chats_with_user(
     try:
         if deep:
             n = 0
+            emit_status(0, None, "Обхожу диалоги…")
             async for dialog in client.get_dialogs():
                 if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
                     break
@@ -1865,12 +1868,22 @@ async def find_chats_with_user(
                 if not await _sleep_responsive(delay, pause_event, stop_event):
                     break
         else:
+            emit_status(0, None, "Спрашиваю Telegram про общие чаты…")
             chats = await _call_with_floodwait(
                 lambda: client.get_common_chats(user_id),
                 pause_event, stop_event, flood_callback=flood_callback,
             )
-            candidates = [c for c in (chats or []) if wanted(c)]
+            chats = list(chats or [])
+            candidates = [c for c in chats if wanted(c)]
             total = len(candidates)
+            log.debug("find_chats_with_user: общих чатов %s, подходящих %s", len(chats), total)
+            if len(chats) >= _COMMON_CHATS_PAGE:
+                # Pyrogram просит getCommonChats одной страницей и не листает дальше.
+                log.warning("Общих чатов вернулось %s — это предел одной страницы", len(chats))
+                emit_status(0, total, "Общих чатов: %s — это предел быстрого поиска. "
+                                      "Остальные ищите полным обходом." % len(chats))
+            else:
+                emit_status(0, total, "Общих чатов: %s. Проверяю права…" % total)
             for i, chat in enumerate(candidates, 1):
                 if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
                     break

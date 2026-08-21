@@ -32,7 +32,6 @@ from core import (
     set_app,
     get_accounts_list,
     set_me_from_dict,
-    fetch_and_set_my_channels,
     list_export_dialogs,
     scan_all_dialogs,
     delete_message_ids,
@@ -126,17 +125,6 @@ def worker_loop():
                     set_app(app)
                     reconnect_delay = 5
                     response_queue.put(ConnectionStatusMsg(connected=True))
-                    channels_ready = False
-
-                    async def ensure_channels_ready():
-                        nonlocal channels_ready
-                        if channels_ready:
-                            return
-                        try:
-                            await fetch_and_set_my_channels(app)
-                        except Exception as ch_err:
-                            log.warning("worker: fetch_and_set_my_channels skip: %s", ch_err)
-                        channels_ready = True
 
                     try:
                         me = await app.get_me()
@@ -195,7 +183,6 @@ def worker_loop():
                         log.debug("worker: request %s", req[0])
                         try:
                             if req[0] == "scan":
-                                await ensure_channels_ready()
                                 include_groups = req[1]
                                 include_channels = req[2]
                                 include_private = req[3]
@@ -224,21 +211,18 @@ def worker_loop():
                                 response_queue.put(ScanDoneMsg(places=places, stopped=stopped, session=session))
                                 log.debug("worker: put scan_done, places=%s stopped=%s", len(places), stopped)
                             elif req[0] == "delete_all_no_scan":
-                                await ensure_channels_ready()
                                 cid = req[1]
                                 response_queue.put(DeleteOpStatusMsg(text=f"Удаление в чате {cid}..."))
                                 count = await delete_all_my_in_chat_no_scan(cid, pause_event=scan_paused, stop_event=scan_stop_requested)
                                 response_queue.put(DeleteAllNoScanDoneMsg(chat_id=cid, count=count, stopped=scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_all_no_scan_done")
                             elif req[0] == "delete_here":
-                                await ensure_channels_ready()
                                 cid, ids = req[1], req[2]
                                 response_queue.put(DeleteOpStatusMsg(text=f"Удаляю {len(ids)} сообщений в чате {cid}..."))
                                 deleted_ids = await delete_message_ids(cid, ids, pause_event=scan_paused, stop_event=scan_stop_requested)
                                 response_queue.put(DeleteDoneMsg(chat_id=cid, deleted_ids=deleted_ids, stopped=scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_done")
                             elif req[0] == "delete_all_except":
-                                await ensure_channels_ready()
                                 except_cid = req[1]
                                 places_list = req[2]
                                 deleted_map = {}
@@ -258,7 +242,6 @@ def worker_loop():
                                 response_queue.put(DeleteAllExceptDoneMsg(deleted_map=deleted_map, stopped=scan_stop_requested.is_set()))
                                 log.debug("worker: put delete_all_except_done")
                             elif req[0] == "delete_in_places":
-                                await ensure_channels_ready()
                                 chat_ids = req[1]
                                 total_deleted = 0
                                 for i, cid in enumerate(chat_ids):
@@ -335,7 +318,6 @@ def worker_loop():
                                 response_queue.put(UserResolvedMsg(user=target))
                                 log.debug("worker: put user_resolved id=%s", target.user_id)
                             elif req[0] == "find_user_chats":
-                                await ensure_channels_ready()
                                 user_id = req[1]
                                 deep = bool(req[2])
                                 include_groups = bool(req[3])
@@ -407,7 +389,6 @@ def worker_loop():
                                 ))
                                 log.debug("worker: put member_dialogs_done, dialogs=%s", len(dialogs))
                             elif req[0] in ("remove_user_from_chats", "add_user_to_chats"):
-                                await ensure_channels_ready()
                                 action = "remove" if req[0] == "remove_user_from_chats" else "add"
                                 user_id = req[1]
                                 chat_pairs = req[2]

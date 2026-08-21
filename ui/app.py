@@ -887,6 +887,10 @@ class App:
         self.members_frame.set_user(msg.user)
 
     def _handle_member_chats_progress(self, msg):
+        # n=0 — это сообщение о самом этапе поиска, а не о конкретном чате.
+        if not msg.n:
+            self.members_frame.status_label.configure(text=msg.title or "Ищу чаты…")
+            return
         short = (msg.title[:40] + "…") if len(msg.title or "") > 40 else (msg.title or "")
         counter = "%s/%s" % (msg.n, msg.total) if msg.total else str(msg.n)
         self.members_frame.status_label.configure(text="Проверено чатов: %s. Сейчас: %s" % (counter, short))

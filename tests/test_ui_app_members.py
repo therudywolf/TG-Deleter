@@ -155,6 +155,19 @@ class TestIncomingMessages:
         )
         assert "5" in app.members_frame.status_label.cget("text")
 
+    def test_stage_message_is_shown_as_is(self, app):
+        # n=0 — это этап поиска, а не конкретный чат: «Проверено чатов: 0» врало бы.
+        app._msg_handlers["MemberChatsProgressMsg"](
+            MemberChatsProgressMsg(n=0, title="Спрашиваю Telegram про общие чаты…", total=None)
+        )
+        assert app.members_frame.status_label.cget("text") == "Спрашиваю Telegram про общие чаты…"
+
+    def test_stage_message_survives_a_known_total(self, app):
+        app._msg_handlers["MemberChatsProgressMsg"](
+            MemberChatsProgressMsg(n=0, title="Общих чатов: 12. Проверяю права…", total=12)
+        )
+        assert app.members_frame.status_label.cget("text") == "Общих чатов: 12. Проверяю права…"
+
     def test_found_chat_is_appended(self, app):
         app._msg_handlers["UserResolvedMsg"](UserResolvedMsg(user=TARGET))
         app._msg_handlers["MemberChatFoundMsg"](MemberChatFoundMsg(chat=chat(-1001, "Группа")))

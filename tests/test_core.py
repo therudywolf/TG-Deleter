@@ -1096,3 +1096,113 @@ class TestPyrogramApiContract:
                      "get_common_chats", "get_chat_member", "ban_chat_member",
                      "unban_chat_member", "add_chat_members"):
             assert hasattr(Client, name), f"Pyrogram больше не отдаёт Client.{name}"
+
+
+class TestFindChatsProgress:
+    """Пользователь должен видеть этап поиска до того, как пойдут чаты."""
+
+    @staticmethod
+    def _client(common_count, chat_type):
+        class FakeChat:
+            def __init__(self, chat_id):
+                self.id = chat_id
+                self.title = "Чат %s" % chat_id
+                self.type = chat_type
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def get_common_chats(self, uid):
+                self.calls.append("common")
+                return [FakeChat(-1000 - i) for i in range(common_count)]
+
+            async def get_chat_member(self, cid, uid):
+                self.calls.append("member")
+                return FakeChatMember("OWNER" if uid == "me" else "MEMBER")
+
+        return FakeClient()
+
+    @pytest.mark.asyncio
+    async def test_status_precedes_the_network_call(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        client = self._client(1, ChatType.SUPERGROUP)
+        events = []
+
+        def on_status(n, total, title):
+            events.append((n, total, title, list(client.calls)))
+
+        set_app(client)
+        try:
+            await find_chats_with_user(777, deep=False, status_callback=on_status)
+        finally:
+            set_app(None)
+
+        # Первое сообщение уходит до запроса общих чатов — иначе экран молчит.
+        assert events[0][0] == 0
+        assert events[0][3] == []
+        assert "общие чаты" in events[0][2].lower()
+
+    @pytest.mark.asyncio
+    async def test_status_reports_how_many_were_found(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        events = []
+        set_app(self._client(3, ChatType.SUPERGROUP))
+        try:
+            await find_chats_with_user(
+                777, deep=False, status_callback=lambda n, t, title: events.append((n, t, title))
+            )
+        finally:
+            set_app(None)
+
+        summary = [e for e in events if e[0] == 0][-1]
+        assert summary[1] == 3
+        assert "Общих чатов: 3" in summary[2]
+
+    @pytest.mark.asyncio
+    async def test_full_page_warns_about_the_limit(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict, _COMMON_CHATS_PAGE
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        events = []
+        set_app(self._client(_COMMON_CHATS_PAGE, ChatType.SUPERGROUP))
+        try:
+            await find_chats_with_user(
+                777, deep=False, status_callback=lambda n, t, title: events.append((n, t, title))
+            )
+        finally:
+            set_app(None)
+
+        summary = [e for e in events if e[0] == 0][-1]
+        assert "предел быстрого поиска" in summary[2]
+
+    @pytest.mark.asyncio
+    async def test_deep_scan_also_announces_itself(self, no_member_delays):
+        from core import find_chats_with_user, set_app, set_me_from_dict
+        from pyrogram.enums import ChatType
+
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def get_dialogs(self):
+                return
+                yield  # pragma: no cover - пустой асинхронный генератор
+
+        events = []
+        set_app(FakeClient())
+        try:
+            await find_chats_with_user(
+                777, deep=True, status_callback=lambda n, t, title: events.append((n, t, title))
+            )
+        finally:
+            set_app(None)
+
+        assert events and events[0][0] == 0
+        assert "диалог" in events[0][2].lower()

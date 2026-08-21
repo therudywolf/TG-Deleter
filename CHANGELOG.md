@@ -24,10 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching the scan and export screens
 - Tooltips on the search-scope selector, the ban checkbox, and every chat row
   (the row tip spells out both sides' status)
-- 100 new tests: core coverage for user-query parsing, error descriptions, rights
+- 106 new tests: core coverage for user-query parsing, error descriptions, rights
   detection, ban vs. kick semantics and per-chat failure isolation, plus the
   project's first GUI tests — the Участники screen and the main window's worker
-  message dispatch (166 tests total, up from 66)
+  message dispatch (172 tests total, up from 66)
 - `tests/conftest.py` redirects `core.get_project_root` to a temporary directory
   for the whole run, so tests can no longer drop `api_config.json` or caches into
   the working tree, and hosts the single shared Tk window the GUI tests reuse
@@ -46,6 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chat rows no longer overflow the status column into the type column; long
   titles and statuses are ellipsised with the full text in a tooltip
 - Column headers line up with the values under them
+- **Chat search hung with no output.** Every worker operation first awaited
+  `ensure_channels_ready()`, a full `get_dialogs()` sweep that populated
+  `state.channel_ids` — a set nothing has read since the ownership check was
+  rewritten. On a busy account that is minutes of silence before the first
+  scan, delete, export, or member search of a session. The dead prefetch is
+  gone from the worker (`fetch_and_set_my_channels` stays for the CLI)
+- The member search now reports its stage before it hits the network
+  («Спрашиваю Telegram про общие чаты…» → «Общих чатов: N. Проверяю права…»),
+  so the screen is never silently busy, and says so when Telegram's
+  common-chats page caps out at 100 and the full sweep is needed instead
 
 ### Changed
 - Version aligned to `0.9.0-beta.1` across `VERSION`, `core.py`, `ui/__init__.py`, and `pyproject.toml`
