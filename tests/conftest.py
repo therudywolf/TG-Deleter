@@ -63,6 +63,22 @@ def isolated_project_root(tmp_path_factory):
             module._PROJECT_ROOT = value
 
 
+class FakeConfirm:
+    """Подставка вместо модального ConfirmDialog: он ждёт живого человека."""
+
+    def __init__(self, answer=True):
+        self.calls = []
+        self.answer = answer
+
+    def __call__(self, parent, title, summary, items=(), note="", danger=False,
+                 ack_text=None, confirm_text="Продолжить"):
+        self.calls.append({
+            "title": title, "summary": summary, "items": list(items), "note": note,
+            "danger": danger, "ack_text": ack_text, "confirm_text": confirm_text,
+        })
+        return self.answer
+
+
 class FakeMessagebox:
     """Диалоги не открываем: тесту нужен только факт вызова и ответ «да»."""
 
@@ -105,12 +121,15 @@ def gui_app(isolated_project_root):
         "session": uiapp.get_current_session,
         "box_app": uiapp.messagebox,
         "box_frame": members_frame.messagebox,
+        "confirm": members_frame.confirm_action,
     }
     uiapp.App._start_worker = lambda self: None
     uiapp.get_current_session = lambda: GUI_SESSION
     box = FakeMessagebox()
     uiapp.messagebox = box
     members_frame.messagebox = box
+    confirm = FakeConfirm()
+    members_frame.confirm_action = confirm
 
     try:
         application = uiapp.App()
@@ -119,8 +138,10 @@ def gui_app(isolated_project_root):
         uiapp.get_current_session = saved["session"]
         uiapp.messagebox = saved["box_app"]
         members_frame.messagebox = saved["box_frame"]
+        members_frame.confirm_action = saved["confirm"]
         pytest.skip("Нет доступного дисплея для Tk: %s" % exc)
     application.box = box
+    application.confirm = confirm
     application.root.geometry("1100x700")
     application._show_members()
     application.root.update()
@@ -133,6 +154,7 @@ def gui_app(isolated_project_root):
         uiapp.get_current_session = saved["session"]
         uiapp.messagebox = saved["box_app"]
         members_frame.messagebox = saved["box_frame"]
+        members_frame.confirm_action = saved["confirm"]
 
 
 @pytest.fixture(scope="session")

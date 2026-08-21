@@ -35,10 +35,11 @@ htmlcov/
 .ruff_cache/
 *.egg-info/
 
-# Scan caches & window state
+# Scan caches, window state & action journal
 scan_cache.json
 scan_cache_*.json
 window_state.json
+member_actions_*.jsonl
 
 # Virtual environments
 venv/

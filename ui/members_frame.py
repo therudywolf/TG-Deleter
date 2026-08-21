@@ -16,15 +16,21 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-Экран «Участники»: удалить человека из всех чатов, где хватает прав,
-и добавить его в чаты, отмеченные галочками.
+Экран «Участники»: убрать человека из чатов, добавить в выбранные
+и откатить собственный бан по журналу операций.
 """
 import logging
 
 import customtkinter as ctk
 from tkinter import messagebox
 
-from core import MemberChat, TARGET_STATUS_LABELS, MY_STATUS_LABELS
+from core import (
+    MY_STATUS_LABELS,
+    TARGET_STATUS_LABELS,
+    MemberChat,
+    _peer_kind,
+    pending_bans,
+)
 from ui.theme import (
     PAD,
     PAD_SM,
@@ -45,12 +51,16 @@ from ui.theme import (
 from ui.queues import scan_paused, scan_stop_requested
 from ui.tooltip import bind_tooltip
 from ui.admins_dialog import AdminsDialog
+from ui.confirm_dialog import confirm_action
+from ui.progress_strip import ProgressStrip
 
 log = logging.getLogger("tg_deleter")
 
 VISIBLE_LIMIT = 500
 MODE_REMOVE = "Удалить из чатов"
 MODE_ADD = "Добавить в чаты"
+MODE_UNBAN = "Снять бан"
+MODES = (MODE_REMOVE, MODE_ADD, MODE_UNBAN)
 
 SCOPE_QUICK = "Общие чаты (быстро)"
 SCOPE_DEEP = "Все диалоги (долго)"
@@ -63,10 +73,42 @@ STATUS_MAX = 30
 STATUS_WIDTH = 210
 TYPE_WIDTH = 100
 
+# С какого числа чатов операция считается массовой и требует явной отметки.
+BULK_THRESHOLD = 5
+
 
 def _shorten(text, limit):
     text = str(text or "")
     return (text[: limit - 1] + "…") if len(text) > limit else text
+
+
+def _chat_kind_label(chat_id) -> str:
+    kind = _peer_kind(chat_id)
+    if kind == "channel":
+        return "Супергруппа"
+    if kind == "chat":
+        return "Группа"
+    return ""
+
+
+def ban_entries_as_chats(entries, with_names=False):
+    """Записи журнала → строки списка, чтобы переиспользовать всю таблицу."""
+    items = []
+    for entry in entries:
+        note = "забанен %s" % entry.when
+        if with_names:
+            note = "%s · %s" % (entry.user_name, note)
+        items.append(MemberChat(
+            chat_id=entry.chat_id,
+            title=entry.chat_title or str(entry.chat_id),
+            type_str=_chat_kind_label(entry.chat_id),
+            my_status="unknown",
+            target_status="banned",
+            can_manage=True,
+            note=note,
+        ))
+    items.sort(key=lambda i: (i.title or "").lower())
+    return items
 
 
 class MemberRow(ctk.CTkFrame):
@@ -117,7 +159,7 @@ class MembersFrame(ctk.CTkFrame):
     """Поиск человека и массовые операции с его участием в чатах."""
 
     def __init__(self, parent, on_resolve_user, on_find_chats, on_load_chats, on_remove, on_add,
-                 on_find_admins=None, **kw):
+                 on_find_admins=None, on_unban=None, **kw):
         super().__init__(parent, fg_color="transparent", **kw)
         self.on_resolve_user = on_resolve_user
         self.on_find_chats = on_find_chats
@@ -125,6 +167,7 @@ class MembersFrame(ctk.CTkFrame):
         self.on_remove = on_remove
         self.on_add = on_add
         self.on_find_admins = on_find_admins
+        self.on_unban = on_unban
 
         self.target = None
         self.mode = MODE_REMOVE
@@ -133,8 +176,8 @@ class MembersFrame(ctk.CTkFrame):
         self._search_job = None
         self._admins_chats = 0
         # Свои списки и выбор для каждого режима, чтобы переключение их не сбрасывало.
-        self._items = {MODE_REMOVE: [], MODE_ADD: []}
-        self._selected = {MODE_REMOVE: set(), MODE_ADD: set()}
+        self._items = {mode: [] for mode in MODES}
+        self._selected = {mode: set() for mode in MODES}
         self._results = {}
 
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -170,7 +213,7 @@ class MembersFrame(ctk.CTkFrame):
 
         # --- Режим -------------------------------------------------------
         self.mode_switch = ctk.CTkSegmentedButton(
-            self, values=[MODE_REMOVE, MODE_ADD], command=self._on_mode_change,
+            self, values=list(MODES), command=self._on_mode_change,
         )
         self.mode_switch.set(MODE_REMOVE)
         self.mode_switch.pack(fill="x", pady=(0, PAD_SM))
@@ -209,6 +252,15 @@ class MembersFrame(ctk.CTkFrame):
             anchor="w", font=font(12), text_color=TEXT_MUTED,
         ).pack(fill="x")
 
+        # --- Опции режима «снять бан» ------------------------------------
+        self.unban_options = ctk.CTkFrame(self, fg_color="transparent")
+        ctk.CTkLabel(
+            self.unban_options,
+            text="Список берётся из журнала: здесь только те баны, что поставили вы сами. "
+                 "После снятия человек не вернётся сам — понадобится ссылка-приглашение.",
+            anchor="w", font=font(12), text_color=TEXT_MUTED,
+        ).pack(fill="x")
+
         # --- Кнопки операций ---------------------------------------------
         self.actions = ctk.CTkFrame(self, fg_color="transparent")
         self.actions.pack(fill="x", pady=(PAD_SM, 0))
@@ -220,14 +272,6 @@ class MembersFrame(ctk.CTkFrame):
             self.actions, text="Удалить из выбранных", command=self._remove_selected, corner_radius=BTN_RADIUS,
             width=200, height=36, fg_color=DANGER, hover_color=DANGER_HOVER, state="disabled",
         )
-        self.load_chats_btn = ctk.CTkButton(
-            self.actions, text="Загрузить чаты", command=self._load_chats, corner_radius=BTN_RADIUS,
-            width=150, height=36, fg_color=ACCENT, hover_color=ACCENT_HOVER,
-        )
-        self.add_btn = ctk.CTkButton(
-            self.actions, text="Добавить в выбранные", command=self._add_selected, corner_radius=BTN_RADIUS,
-            width=200, height=36, fg_color=BTN_SECONDARY, state="disabled",
-        )
         self.admins_btn = ctk.CTkButton(
             self.actions, text="Кто может удалить", command=self._find_admins, corner_radius=BTN_RADIUS,
             width=180, height=36, fg_color=BTN_SECONDARY, state="disabled",
@@ -236,6 +280,27 @@ class MembersFrame(ctk.CTkFrame):
             self.admins_btn,
             "Соберёт администраторов тех чатов, где прав у вас нет, и покажет, "
             "кому написать. Один админ обычно закрывает сразу десятки чатов.",
+        )
+        self.load_chats_btn = ctk.CTkButton(
+            self.actions, text="Загрузить чаты", command=self._load_chats, corner_radius=BTN_RADIUS,
+            width=150, height=36, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+        )
+        self.add_btn = ctk.CTkButton(
+            self.actions, text="Добавить в выбранные", command=self._add_selected, corner_radius=BTN_RADIUS,
+            width=200, height=36, fg_color=BTN_SECONDARY, state="disabled",
+        )
+        self.load_bans_btn = ctk.CTkButton(
+            self.actions, text="Показать баны", command=self.load_pending_bans, corner_radius=BTN_RADIUS,
+            width=150, height=36, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+        )
+        bind_tooltip(
+            self.load_bans_btn,
+            "Читает журнал операций. Без выбранного человека покажет все ваши баны, "
+            "с выбранным — только его.",
+        )
+        self.unban_btn = ctk.CTkButton(
+            self.actions, text="Снять бан в выбранных", command=self._unban_selected, corner_radius=BTN_RADIUS,
+            width=200, height=36, fg_color=BTN_SECONDARY, state="disabled",
         )
         self.pause_btn = ctk.CTkButton(
             self.actions, text="Пауза", command=self._toggle_pause, corner_radius=BTN_RADIUS,
@@ -250,6 +315,8 @@ class MembersFrame(ctk.CTkFrame):
             self, text="Укажите человека, затем найдите чаты.", text_color="gray", anchor="w",
         )
         self.status_label.pack(fill="x", pady=(PAD_SM, PAD_SM))
+
+        self.progress = ProgressStrip(self)
 
         # --- Фильтры списка ----------------------------------------------
         tools = ctk.CTkFrame(self, fg_color="transparent")
@@ -272,14 +339,6 @@ class MembersFrame(ctk.CTkFrame):
             tools, text="Выбрать видимые", command=lambda: self._set_visible_checks(True),
             corner_radius=BTN_RADIUS, width=140, height=28, fg_color=BTN_SECONDARY,
         ).pack(side="right")
-
-        self.progress = ctk.CTkProgressBar(self, mode="indeterminate", height=4)
-        self.progress.pack(fill="x", pady=(0, PAD))
-        self.progress.pack_forget()
-        self.action_progress = ctk.CTkProgressBar(self, mode="determinate", height=8)
-        self.action_progress.set(0)
-        self.action_progress.pack(fill="x", pady=(0, PAD_SM))
-        self.action_progress.pack_forget()
 
         header = ctk.CTkFrame(self, fg_color=("gray85", "gray16"), corner_radius=0, height=28)
         header.pack(fill="x")
@@ -324,6 +383,8 @@ class MembersFrame(ctk.CTkFrame):
         # Найденные ранее чаты относились к другому человеку.
         self._items[MODE_REMOVE] = []
         self._selected[MODE_REMOVE].clear()
+        self._items[MODE_UNBAN] = []
+        self._selected[MODE_UNBAN].clear()
         self._results = {}
         self._apply_filter()
         self.status_label.configure(
@@ -343,19 +404,23 @@ class MembersFrame(ctk.CTkFrame):
 
     def _on_mode_change(self, value):
         self.mode = value
-        remove_mode = value == MODE_REMOVE
-        self.add_options.pack_forget()
-        self.remove_options.pack_forget()
-        options = self.remove_options if remove_mode else self.add_options
+        for panel in (self.remove_options, self.add_options, self.unban_options):
+            panel.pack_forget()
+        options = {
+            MODE_REMOVE: self.remove_options,
+            MODE_ADD: self.add_options,
+            MODE_UNBAN: self.unban_options,
+        }[value]
         options.pack(fill="x", after=self.mode_switch)
         # Кнопки пакуются справа налево, поэтому порядок задаём заново на каждом переключении.
-        for btn in (self.find_chats_btn, self.remove_btn, self.load_chats_btn,
-                    self.add_btn, self.admins_btn, self.pause_btn, self.stop_btn):
+        for btn in (self.find_chats_btn, self.remove_btn, self.admins_btn, self.load_chats_btn,
+                    self.add_btn, self.load_bans_btn, self.unban_btn, self.pause_btn, self.stop_btn):
             btn.pack_forget()
-        if remove_mode:
-            order = [self.find_chats_btn, self.remove_btn, self.admins_btn]
-        else:
-            order = [self.load_chats_btn, self.add_btn]
+        order = {
+            MODE_REMOVE: [self.find_chats_btn, self.remove_btn, self.admins_btn],
+            MODE_ADD: [self.load_chats_btn, self.add_btn],
+            MODE_UNBAN: [self.load_bans_btn, self.unban_btn],
+        }[value]
         for btn in order + [self.pause_btn, self.stop_btn]:
             btn.pack(side="right", padx=PAD_SM)
         self._results = {}
@@ -371,6 +436,7 @@ class MembersFrame(ctk.CTkFrame):
         self.remove_btn.configure(state="normal" if has_user and selected else "disabled")
         self.add_btn.configure(state="normal" if has_user and selected else "disabled")
         self.admins_btn.configure(state="normal" if self._chats_without_rights() else "disabled")
+        self.unban_btn.configure(state="normal" if selected and self.mode == MODE_UNBAN else "disabled")
 
     # ------------------------------------------------------------------
     # Запуск операций
@@ -380,10 +446,13 @@ class MembersFrame(ctk.CTkFrame):
         if self._busy or not self.target:
             return
         deep = self.scope_var.get() == SCOPE_DEEP
-        if deep and not messagebox.askyesno(
+        if deep and not confirm_action(
+            self.winfo_toplevel(),
             "Полный обход",
-            "Полный обход проверяет каждый диалог по отдельности и может занять много минут, "
-            "а Telegram — притормозить аккаунт.\n\nПродолжить?",
+            "Проверить каждый диалог по отдельности?",
+            note="Это может занять много минут, а Telegram — притормозить аккаунт. "
+                 "Быстрый поиск по общим чатам обычно находит всё то же самое.",
+            confirm_text="Обойти всё",
         ):
             return
         scan_paused.clear()
@@ -406,9 +475,31 @@ class MembersFrame(ctk.CTkFrame):
         self._selected[MODE_ADD].clear()
         self._results = {}
         self._apply_filter()
-        self.set_busy(True, "Загружаю")
+        self.set_busy(True, "Загружаю чаты")
         self.status_label.configure(text="Загружаю список групп и каналов…")
         self.on_load_chats(True, True)
+
+    def load_pending_bans(self):
+        """Показать собственные баны из журнала: только их и можно откатить."""
+        if self._busy:
+            return
+        user_id = self.target.user_id if self.target else None
+        try:
+            entries = pending_bans(user_id)
+        except Exception as e:
+            log.warning("Журнал не прочитан: %s", e)
+            entries = []
+        self._items[MODE_UNBAN] = ban_entries_as_chats(entries, with_names=user_id is None)
+        self._selected[MODE_UNBAN] = {i.chat_id for i in self._items[MODE_UNBAN]}
+        self._results = {}
+        self._apply_filter()
+        if not entries:
+            whose = "у %s" % self.target.display_name if self.target else "в журнале"
+            self.status_label.configure(text="Незакрытых банов %s нет." % whose)
+        else:
+            self.status_label.configure(
+                text="Ваших банов в силе: %s. Отметьте, какие снять." % len(entries)
+            )
 
     def _selected_pairs(self):
         selected = self._selected[self.mode]
@@ -422,19 +513,23 @@ class MembersFrame(ctk.CTkFrame):
             messagebox.showinfo("Участники", "Отметьте хотя бы один чат.")
             return
         ban = bool(self.ban_var.get())
-        action = "удалить и забанить" if ban else "удалить (сможет вернуться)"
-        if not messagebox.askyesno(
-            "Удаление участника",
-            "Точно %s %s в %s чат(ах)?\n\nЭто действие затрагивает других людей и "
-            "отменяется только вручную." % (action, self.target.summary, len(pairs)),
+        summary = "%s %s из %s чат(ов)?" % (
+            "Удалить и забанить" if ban else "Удалить", self.target.summary, len(pairs),
+        )
+        note = ("Забаненный не вернётся сам. Откатить можно на вкладке «Снять бан» — "
+                "операция записывается в журнал."
+                if ban else
+                "Без бана человек сможет зайти заново по ссылке-приглашению.")
+        ack = None
+        if ban or len(pairs) > BULK_THRESHOLD:
+            ack = "Понимаю, что это затронет других людей"
+        if not confirm_action(
+            self.winfo_toplevel(), "Удаление участника", summary,
+            items=[t for _cid, t in pairs], note=note, danger=True,
+            ack_text=ack, confirm_text="Удалить" if not ban else "Удалить и забанить",
         ):
             return
-        scan_paused.clear()
-        scan_stop_requested.clear()
-        self._results = {}
-        self.set_busy(True, "Удаляю")
-        self._start_action_progress()
-        self.status_label.configure(text="Удаляю из чатов: 0/%s…" % len(pairs))
+        self._start_action("Удаляю", len(pairs))
         self.on_remove(self.target.user_id, pairs, ban)
 
     def _add_selected(self):
@@ -444,20 +539,51 @@ class MembersFrame(ctk.CTkFrame):
         if not pairs:
             messagebox.showinfo("Участники", "Отметьте хотя бы один чат.")
             return
-        if not messagebox.askyesno(
-            "Добавление участника",
-            "Добавить %s в %s чат(ах)?\n\nTelegram может отказать из-за настроек приватности, "
-            "а массовые приглашения — привести к ограничениям аккаунта."
-            % (self.target.summary, len(pairs)),
+        ack = "Понимаю риск ограничений за массовые приглашения" if len(pairs) > BULK_THRESHOLD else None
+        if not confirm_action(
+            self.winfo_toplevel(), "Добавление участника",
+            "Добавить %s в %s чат(ов)?" % (self.target.summary, len(pairs)),
+            items=[t for _cid, t in pairs],
+            note="Telegram может отказать из-за настроек приватности человека, "
+                 "а массовые приглашения — привести к ограничениям аккаунта.",
+            ack_text=ack, confirm_text="Добавить",
         ):
             return
+        self._start_action("Добавляю", len(pairs))
+        self.on_add(self.target.user_id, pairs)
+
+    def _unban_selected(self):
+        if self._busy or not self.on_unban:
+            return
+        pairs = self._selected_pairs()
+        if not pairs:
+            messagebox.showinfo("Участники", "Отметьте хотя бы один чат.")
+            return
+        target_id = self.target.user_id if self.target else None
+        if target_id is None:
+            messagebox.showinfo(
+                "Участники",
+                "Сначала найдите человека — снимать бан нужно у конкретного пользователя.",
+            )
+            return
+        whose = self.target.summary
+        if not confirm_action(
+            self.winfo_toplevel(), "Снятие бана",
+            "Снять бан с %s в %s чат(ах)?" % (whose, len(pairs)),
+            items=[t for _cid, t in pairs],
+            note="Человек не вернётся сам: бан снимается, но зайти он должен по ссылке.",
+            confirm_text="Снять бан",
+        ):
+            return
+        self._start_action("Снимаю бан", len(pairs))
+        self.on_unban(target_id, pairs)
+
+    def _start_action(self, stage, total):
         scan_paused.clear()
         scan_stop_requested.clear()
         self._results = {}
-        self.set_busy(True, "Добавляю")
-        self._start_action_progress()
-        self.status_label.configure(text="Добавляю в чаты: 0/%s…" % len(pairs))
-        self.on_add(self.target.user_id, pairs)
+        self.set_busy(True, stage, total=total)
+        self.status_label.configure(text="%s: 0/%s…" % (stage, total))
 
     def _chats_without_rights(self):
         """Чаты, где удалить сами не можем, — именно там нужен чужой админ."""
@@ -476,18 +602,17 @@ class MembersFrame(ctk.CTkFrame):
         scan_paused.clear()
         scan_stop_requested.clear()
         self._admins_chats = len(pairs)
-        self.set_busy(True, "Ищу админов")
+        self.set_busy(True, "Ищу админов", total=len(pairs))
         self.status_label.configure(text="Собираю админов: 0/%s…" % len(pairs))
         self.on_find_admins(pairs, self.target.user_id if self.target else None)
 
     def update_admins_progress(self, n, total, title):
-        self.status_label.configure(
-            text="Собираю админов: %s/%s · %s" % (n, total, _shorten(title, 40))
-        )
+        self.progress.update_progress(done=n, total=total, detail=title)
 
     def finish_admins(self, admins, stopped):
         self.set_busy(False)
         prefix = "Поиск остановлен." if stopped else "Готово."
+        self.progress.finish("Админы собраны" if not stopped else "Остановлено", ok=not stopped)
         self.status_label.configure(
             text="%s Людей, которые могут удалить: %s." % (prefix, len(admins))
         )
@@ -503,29 +628,26 @@ class MembersFrame(ctk.CTkFrame):
     # Состояние выполнения
     # ------------------------------------------------------------------
 
-    def set_busy(self, busy: bool, label: str | None = None):
+    def set_busy(self, busy: bool, label: str | None = None, total=None):
         self._busy = busy
         self._paused = False
         if busy:
-            self.find_user_btn.configure(state="disabled")
-            self.find_chats_btn.configure(state="disabled", text=label or "Выполняется")
-            self.load_chats_btn.configure(state="disabled")
-            self.remove_btn.configure(state="disabled")
-            self.add_btn.configure(state="disabled")
-            self.admins_btn.configure(state="disabled")
+            for btn in (self.find_user_btn, self.find_chats_btn, self.load_chats_btn, self.load_bans_btn,
+                        self.remove_btn, self.add_btn, self.unban_btn, self.admins_btn):
+                btn.configure(state="disabled")
+            self.find_chats_btn.configure(text=label or "Выполняется")
             self.pause_btn.configure(state="normal", text="Пауза")
             self.stop_btn.configure(state="normal")
-            self.progress.pack(fill="x", pady=(0, PAD))
-            self.progress.start()
+            self.progress.pack(fill="x", pady=(0, PAD_SM), before=self.status_label)
+            self.progress.start(label or "Выполняется", total)
         else:
             scan_paused.clear()
             self.find_user_btn.configure(state="normal")
             self.find_chats_btn.configure(text="Найти чаты")
             self.load_chats_btn.configure(state="normal")
+            self.load_bans_btn.configure(state="normal")
             self.pause_btn.configure(state="disabled", text="Пауза")
             self.stop_btn.configure(state="disabled")
-            self.progress.stop()
-            self.progress.pack_forget()
             self._sync_buttons()
 
     def _toggle_pause(self):
@@ -551,23 +673,23 @@ class MembersFrame(ctk.CTkFrame):
         self.stop_btn.configure(state="disabled")
         self.status_label.configure(text="Останавливаю…")
 
-    def _start_action_progress(self):
-        self.action_progress.set(0)
-        self.action_progress.pack(fill="x", pady=(0, PAD_SM))
-
-    def _hide_action_progress(self):
-        self.action_progress.set(0)
-        self.action_progress.pack_forget()
-
     # ------------------------------------------------------------------
     # Приём данных от воркера
     # ------------------------------------------------------------------
+
+    def update_search_progress(self, n, total, title):
+        """Ход поиска чатов: n=0 — это этап, а не конкретный чат."""
+        if not n:
+            self.progress.update_progress(total=total, detail="", stage=title or "Ищу чаты")
+            return
+        self.progress.update_progress(done=n, total=total, detail=title)
 
     def add_found_chat(self, mc: MemberChat):
         self._items[MODE_REMOVE].append(mc)
         if mc.can_manage:
             self._selected[MODE_REMOVE].add(mc.chat_id)
         if self.mode == MODE_REMOVE and self._matches(mc) and self._rendered_count() < VISIBLE_LIMIT:
+            self._drop_placeholder()
             self._build_row(mc)
         self._update_counters()
 
@@ -578,6 +700,7 @@ class MembersFrame(ctk.CTkFrame):
         self._apply_filter()
         manageable = sum(1 for c in chats if c.can_manage)
         prefix = "Поиск остановлен." if stopped else "Поиск завершён."
+        self.progress.finish("Остановлено" if stopped else "Поиск завершён", ok=not stopped)
         if not chats:
             self.status_label.configure(text=prefix + " Общих чатов с этим человеком не нашлось.")
         else:
@@ -585,11 +708,15 @@ class MembersFrame(ctk.CTkFrame):
                 text="%s Чатов: %s, удалить можно из %s." % (prefix, len(chats), manageable)
             )
 
+    def update_dialogs_progress(self, n, title):
+        self.progress.update_progress(done=n, detail=title)
+
     def append_dialogs(self, batch):
         self._items[MODE_ADD].extend(batch)
         if self.mode == MODE_ADD:
             for place in batch:
                 if self._matches(place) and self._rendered_count() < VISIBLE_LIMIT:
+                    self._drop_placeholder()
                     self._build_row(place)
         self._update_counters()
 
@@ -599,25 +726,25 @@ class MembersFrame(ctk.CTkFrame):
         self.set_busy(False)
         self._apply_filter()
         prefix = "Список остановлен." if stopped else "Список загружен."
+        self.progress.finish("Остановлено" if stopped else "Список загружен", ok=not stopped)
         self.status_label.configure(text="%s Чатов: %s. Отметьте нужные." % (prefix, len(dialogs)))
 
     def update_action_progress(self, action, current, total, result):
-        total = max(1, int(total or 1))
-        self.action_progress.set(min(1.0, current / total))
         self._results[result.chat_id] = result
-        verb = "Удаляю" if action == "remove" else "Добавляю"
-        self.status_label.configure(
-            text="%s: %s/%s · %s — %s" % (verb, current, total, _shorten(result.title, 40), result.note)
+        verb = {"remove": "Удаляю", "add": "Добавляю", "unban": "Снимаю бан"}.get(action, "Работаю")
+        self.progress.update_progress(
+            done=current, total=total, stage=verb,
+            detail="%s — %s" % (_shorten(result.title, 28), result.note),
         )
         log.info("%s: %s — %s", verb, result.title, result.note)
 
     def finish_action(self, action, results, stopped):
         self.set_busy(False)
-        self._hide_action_progress()
         for result in results:
             self._results[result.chat_id] = result
         if not results:
             # Причину уже показал обработчик ошибки — статус не затираем.
+            self.progress.finish("Не выполнено", ok=False)
             return
         ok = sum(1 for r in results if r.ok)
         failed = len(results) - ok
@@ -625,12 +752,17 @@ class MembersFrame(ctk.CTkFrame):
             done_ids = {r.chat_id for r in results if r.ok}
             self._items[MODE_REMOVE] = [c for c in self._items[MODE_REMOVE] if c.chat_id not in done_ids]
             self._selected[MODE_REMOVE].difference_update(done_ids)
+        elif action == "unban":
+            done_ids = {r.chat_id for r in results if r.ok}
+            self._items[MODE_UNBAN] = [c for c in self._items[MODE_UNBAN] if c.chat_id not in done_ids]
+            self._selected[MODE_UNBAN].difference_update(done_ids)
         else:
             self._selected[MODE_ADD].difference_update({r.chat_id for r in results if r.ok})
         self._apply_filter()
         title = "Остановлено" if stopped else "Готово"
-        verb = "Удалено" if action == "remove" else "Добавлено"
+        verb = {"remove": "Удалено", "add": "Добавлено", "unban": "Бан снят"}.get(action, "Обработано")
         summary = "%s: %s из %s чатов." % (verb, ok, len(results))
+        self.progress.finish(title, ok=not stopped and not failed)
         self.status_label.configure(text=summary)
         details = "\n".join("• %s — %s" % (r.title, r.note) for r in results if not r.ok)
         if failed and details:
@@ -640,12 +772,12 @@ class MembersFrame(ctk.CTkFrame):
     def reset(self):
         """Сброс при смене аккаунта."""
         self.target = None
-        self._items = {MODE_REMOVE: [], MODE_ADD: []}
-        self._selected = {MODE_REMOVE: set(), MODE_ADD: set()}
+        self._items = {mode: [] for mode in MODES}
+        self._selected = {mode: set() for mode in MODES}
         self._results = {}
         self._admins_chats = 0
         self.set_busy(False)
-        self._hide_action_progress()
+        self.progress.hide()
         self.user_label.configure(
             text="Найдите человека по @username, ID, телефону или ссылке t.me.", text_color=TEXT_MUTED
         )
@@ -677,6 +809,12 @@ class MembersFrame(ctk.CTkFrame):
     def _rendered_count(self):
         return len([w for w in self.scroll.winfo_children() if isinstance(w, MemberRow)])
 
+    def _drop_placeholder(self):
+        """Убрать «Список пуст», иначе он повиснет над приходящими строками."""
+        for widget in self.scroll.winfo_children():
+            if not isinstance(widget, MemberRow):
+                widget.destroy()
+
     def _row_status(self, item):
         """Короткий статус, его цвет и подробности для подсказки."""
         result = self._results.get(item.chat_id)
@@ -684,6 +822,8 @@ class MembersFrame(ctk.CTkFrame):
             return result.note, (OK_COLOR if result.ok else FAIL_COLOR), "%s — %s" % (item.title, result.note)
         if not isinstance(item, MemberChat):
             return "", None, ""
+        if self.mode == MODE_UNBAN:
+            return item.note, None, "%s · %s" % (item.title, item.note)
         detail = " · ".join(p for p in (
             "Он: " + TARGET_STATUS_LABELS.get(item.target_status, item.target_status),
             MY_STATUS_LABELS.get(item.my_status, "ваш статус неизвестен").capitalize(),
@@ -707,6 +847,13 @@ class MembersFrame(ctk.CTkFrame):
         row.pack(fill="x", pady=(0, 1))
         return row
 
+    def _empty_hint(self):
+        return {
+            MODE_REMOVE: "Нажмите «Найти чаты».",
+            MODE_ADD: "Нажмите «Загрузить чаты».",
+            MODE_UNBAN: "Нажмите «Показать баны».",
+        }[self.mode]
+
     def _apply_filter(self):
         for widget in self.scroll.winfo_children():
             widget.destroy()
@@ -715,8 +862,8 @@ class MembersFrame(ctk.CTkFrame):
         if not items:
             empty = ctk.CTkFrame(self.scroll, fg_color="transparent")
             empty.pack(fill="both", expand=True, pady=PAD * 3)
-            hint = "Нажмите «Найти чаты»." if self.mode == MODE_REMOVE else "Нажмите «Загрузить чаты»."
-            ctk.CTkLabel(empty, text="Список пуст. " + hint, font=font(14), text_color="gray").pack(expand=True)
+            ctk.CTkLabel(empty, text="Список пуст. " + self._empty_hint(),
+                         font=font(14), text_color="gray").pack(expand=True)
             self._update_counters(visible=0)
             return
         for item in items[:VISIBLE_LIMIT]:

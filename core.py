@@ -1994,6 +1994,7 @@ async def remove_user_from_chats(
         emit(i, MemberActionResult(chat_id=cid, title=title, ok=True, note=note))
         if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
             break
+    _log_member_actions(ACTION_BAN if ban else ACTION_KICK, user_id, results)
     log.debug("remove_user_from_chats done: обработано %s из %s", len(results), total)
     return results
 
@@ -2057,6 +2058,7 @@ async def add_user_to_chats(
         emit(i, MemberActionResult(chat_id=cid, title=title, ok=True, note="Добавлен"))
         if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
             break
+    _log_member_actions(ACTION_ADD, user_id, results)
     log.debug("add_user_to_chats done: обработано %s из %s", len(results), total)
     return results
 
@@ -2211,3 +2213,224 @@ async def find_chat_admins(
     )
     log.debug("find_chat_admins done: людей %s", len(admins))
     return admins
+
+
+# ---------------------------------------------------------------------------
+# Журнал операций с участниками и откат бана
+# ---------------------------------------------------------------------------
+
+ACTION_BAN = "ban"
+ACTION_KICK = "kick"
+ACTION_ADD = "add"
+ACTION_UNBAN = "unban"
+
+_ACTION_LOG_LIMIT = 5000
+
+
+@dataclass
+class ActionLogEntry:
+    """Одна строка журнала: что мы сделали с человеком в конкретном чате."""
+    ts: str
+    action: str          # ban / kick / add / unban
+    user_id: int
+    user_name: str
+    chat_id: int
+    chat_title: str
+    ok: bool
+    note: str = ""
+
+    @property
+    def when(self) -> str:
+        """Дата и время в читаемом виде."""
+        try:
+            return datetime.fromisoformat(self.ts).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            return self.ts or ""
+
+    def to_dict(self) -> dict:
+        return {
+            "ts": self.ts,
+            "action": self.action,
+            "user_id": self.user_id,
+            "user_name": self.user_name,
+            "chat_id": self.chat_id,
+            "chat_title": self.chat_title,
+            "ok": self.ok,
+            "note": self.note,
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> "ActionLogEntry | None":
+        try:
+            return ActionLogEntry(
+                ts=str(data.get("ts") or ""),
+                action=str(data.get("action") or ""),
+                user_id=int(data.get("user_id")),
+                user_name=str(data.get("user_name") or ""),
+                chat_id=int(data.get("chat_id")),
+                chat_title=str(data.get("chat_title") or ""),
+                ok=bool(data.get("ok")),
+                note=str(data.get("note") or ""),
+            )
+        except (TypeError, ValueError):
+            return None
+
+
+def action_log_path(session: str | None = None) -> str:
+    """Файл журнала для аккаунта: свой на каждую сессию."""
+    key = _safe_filename(session or get_cache_session_key(), "session", 40)
+    return os.path.join(get_project_root(), f"member_actions_{key}.jsonl")
+
+
+def append_action_log(entries, session: str | None = None) -> int:
+    """
+    Дописать записи в журнал. Никогда не роняет операцию: журнал — вспомогательный.
+    Возвращает число записанных строк.
+    """
+    rows = [e for e in (entries or []) if isinstance(e, ActionLogEntry)]
+    if not rows:
+        return 0
+    path = action_log_path(session)
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            for entry in rows:
+                f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.warning("Журнал операций не записан: %s", e)
+        return 0
+    return len(rows)
+
+
+def read_action_log(session: str | None = None, limit: int = _ACTION_LOG_LIMIT) -> list[ActionLogEntry]:
+    """Прочитать журнал, самые старые записи первыми. Битые строки пропускаются."""
+    path = action_log_path(session)
+    if not os.path.isfile(path):
+        return []
+    entries: list[ActionLogEntry] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue
+                entry = ActionLogEntry.from_dict(data) if isinstance(data, dict) else None
+                if entry is not None:
+                    entries.append(entry)
+    except Exception as e:
+        log.warning("Журнал операций не прочитан: %s", e)
+        return []
+    return entries[-limit:] if limit else entries
+
+
+def pending_bans(user_id: int | None = None, session: str | None = None) -> list[ActionLogEntry]:
+    """
+    Баны, которые мы поставили и ещё не сняли.
+
+    По каждой паре (человек, чат) смотрим последнее удачное действие: если это
+    бан — значит откатывать есть что.
+    """
+    last: dict[tuple[int, int], ActionLogEntry] = {}
+    for entry in read_action_log(session):
+        if not entry.ok or entry.action not in (ACTION_BAN, ACTION_KICK, ACTION_UNBAN, ACTION_ADD):
+            continue
+        if user_id is not None and entry.user_id != int(user_id):
+            continue
+        last[(entry.user_id, entry.chat_id)] = entry
+    return [e for e in last.values() if e.action == ACTION_BAN]
+
+
+def clear_action_log(session: str | None = None) -> bool:
+    """Стереть журнал. Сами баны при этом никуда не денутся."""
+    path = action_log_path(session)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+        return True
+    except Exception as e:
+        log.warning("Журнал операций не удалён: %s", e)
+        return False
+
+
+def _log_member_actions(action: str, target: "TargetUser | int", results, session=None) -> None:
+    """Записать итоги операции в журнал (для отката и истории)."""
+    if isinstance(target, TargetUser):
+        user_id, user_name = target.user_id, target.display_name
+    else:
+        user_id, user_name = int(target), str(target)
+    stamp = datetime.now().isoformat(timespec="seconds")
+    entries = [
+        ActionLogEntry(
+            ts=stamp, action=action, user_id=user_id, user_name=user_name,
+            chat_id=r.chat_id, chat_title=r.title, ok=r.ok, note=r.note,
+        )
+        for r in results or []
+    ]
+    append_action_log(entries, session)
+
+
+async def unban_user_in_chats(
+    user_id: int,
+    chats,
+    pause_event=None,
+    stop_event=None,
+    progress_callback=None,
+    flood_callback=None,
+) -> list[MemberActionResult]:
+    """
+    Снять бан — откат «Удалить и забанить».
+
+    Человек не вернётся в чат сам: бан снят, но зайти он должен по ссылке.
+    В обычных группах бана нет вовсе, там откат — только пригласить заново.
+    """
+    client = get_app()
+    if not client:
+        raise RuntimeError("Нет подключения к Telegram.")
+
+    targets = _action_targets(chats)
+    if not targets:
+        raise ValueError("Не выбраны чаты.")
+    results: list[MemberActionResult] = []
+    delay = max(get_delay_sec(), _MEMBER_REMOVE_DELAY_MIN)
+    total = len(targets)
+    log.debug("unban_user_in_chats: user_id=%s чатов=%s", user_id, total)
+
+    def emit(i, result):
+        results.append(result)
+        if progress_callback:
+            try:
+                progress_callback(i, total, result)
+            except Exception:
+                pass
+
+    for i, (cid, title) in enumerate(targets, 1):
+        if _is_stopped(stop_event) or not await _wait_if_paused(pause_event, stop_event):
+            break
+        if _peer_kind(cid) != "channel":
+            emit(i, MemberActionResult(
+                chat_id=cid, title=title, ok=False,
+                note="В обычной группе бана нет — пригласите заново",
+            ))
+            continue
+        try:
+            await _call_with_floodwait(
+                lambda: client.unban_chat_member(cid, user_id),
+                pause_event, stop_event, flood_callback=flood_callback,
+            )
+        except _OperationStopped:
+            break
+        except Exception as e:
+            log.warning("Не удалось снять бан %s в чате %s: %s", user_id, cid, e)
+            emit(i, MemberActionResult(chat_id=cid, title=title, ok=False, note=describe_telegram_error(e)))
+            if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+                break
+            continue
+        emit(i, MemberActionResult(chat_id=cid, title=title, ok=True, note="Бан снят"))
+        if i < total and not await _sleep_responsive(delay, pause_event, stop_event):
+            break
+    _log_member_actions(ACTION_UNBAN, user_id, results)
+    log.debug("unban_user_in_chats done: обработано %s из %s", len(results), total)
+    return results

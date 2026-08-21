@@ -146,30 +146,39 @@ class TestIncomingMessages:
         assert app.members_frame.target is TARGET
 
     def test_progress_shows_counter_and_title(self, app):
+        strip = app.members_frame.progress
+        strip.start("Ищу чаты")
         app._msg_handlers["MemberChatsProgressMsg"](
             MemberChatsProgressMsg(n=2, title="Рабочий чат", total=7)
         )
-        text = app.members_frame.status_label.cget("text")
-        assert "2/7" in text and "Рабочий чат" in text
+        assert strip.counter_label.cget("text") == "2 / 7"
+        assert "Рабочий чат" in strip.detail_label.cget("text")
 
     def test_progress_without_total_shows_plain_count(self, app):
+        strip = app.members_frame.progress
+        strip.start("Ищу чаты")
         app._msg_handlers["MemberChatsProgressMsg"](
             MemberChatsProgressMsg(n=5, title="Чат", total=None)
         )
-        assert "5" in app.members_frame.status_label.cget("text")
+        assert strip.counter_label.cget("text") == "5"
 
-    def test_stage_message_is_shown_as_is(self, app):
+    def test_stage_message_becomes_the_stage(self, app):
         # n=0 — это этап поиска, а не конкретный чат: «Проверено чатов: 0» врало бы.
+        strip = app.members_frame.progress
+        strip.start("Ищу чаты")
         app._msg_handlers["MemberChatsProgressMsg"](
             MemberChatsProgressMsg(n=0, title="Спрашиваю Telegram про общие чаты…", total=None)
         )
-        assert app.members_frame.status_label.cget("text") == "Спрашиваю Telegram про общие чаты…"
+        assert strip.stage_label.cget("text") == "Спрашиваю Telegram про общие чаты…"
 
-    def test_stage_message_survives_a_known_total(self, app):
+    def test_stage_message_carries_the_total(self, app):
+        strip = app.members_frame.progress
+        strip.start("Ищу чаты")
         app._msg_handlers["MemberChatsProgressMsg"](
             MemberChatsProgressMsg(n=0, title="Общих чатов: 12. Проверяю права…", total=12)
         )
-        assert app.members_frame.status_label.cget("text") == "Общих чатов: 12. Проверяю права…"
+        assert strip.stage_label.cget("text") == "Общих чатов: 12. Проверяю права…"
+        assert strip.counter_label.cget("text") == "0 / 12"
 
     def test_found_chat_is_appended(self, app):
         app._msg_handlers["UserResolvedMsg"](UserResolvedMsg(user=TARGET))
@@ -307,19 +316,21 @@ class TestAdminLookupWiring:
             assert name in app._msg_handlers
 
     def test_progress_reaches_the_screen(self, app):
+        strip = app.members_frame.progress
+        strip.start("Ищу админов", total=40)
         app._msg_handlers["AdminsProgressMsg"](
             AdminsProgressMsg(n=7, total=40, title="ДИТ. WAF - КППМ")
         )
-        text = app.members_frame.status_label.cget("text")
-        assert "7/40" in text and "КППМ" in text
+        assert strip.counter_label.cget("text") == "7 / 40"
+        assert "КППМ" in strip.detail_label.cget("text")
 
     def test_found_admin_is_only_logged(self, app):
         from core import AdminContact
 
         # Промежуточные находки не трогают экран — итог показывает окно.
-        before = app.members_frame.status_label.cget("text")
+        before = app.members_frame.progress.detail_label.cget("text")
         app._msg_handlers["AdminFoundMsg"](AdminFoundMsg(admin=AdminContact(user_id=5, username="x")))
-        assert app.members_frame.status_label.cget("text") == before
+        assert app.members_frame.progress.detail_label.cget("text") == before
 
     def test_done_opens_the_dialog(self, app, monkeypatch):
         import ui.members_frame as members_frame

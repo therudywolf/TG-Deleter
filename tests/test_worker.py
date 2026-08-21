@@ -390,6 +390,19 @@ class TestMemberBranches:
         assert msg.action == "add"
         assert worker.client.added == [(FakeClient.CHANNEL, 777)]
 
+    def test_unban_user_in_chats(self, worker):
+        worker.send("unban_user_in_chats", 777, [(FakeClient.SUPERGROUP, "Супергруппа")])
+        msg = worker.wait_for(MemberActionDoneMsg)
+        assert msg.action == "unban"
+        assert worker.client.unbanned == [(FakeClient.SUPERGROUP, 777)]
+        assert msg.results[0].note == "Бан снят"
+
+    def test_unban_failure_is_reported_and_closed(self, worker):
+        worker.send("unban_user_in_chats", 777, [])
+        err = worker.wait_for(ErrorMsg)
+        assert err.operation == "unban_user_in_chats"
+        assert worker.wait_for(MemberActionDoneMsg).results == []
+
     def test_find_chat_admins(self, worker):
         worker.send("find_chat_admins", [(FakeClient.SUPERGROUP, "Супергруппа")], 777,
                     scan_paused, scan_stop_requested)

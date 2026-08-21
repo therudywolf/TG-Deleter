@@ -1675,3 +1675,295 @@ class TestFindChatAdmins:
                 await find_chat_admins([])
         finally:
             set_app(None)
+
+
+class TestActionLog:
+    """Журнал операций: он нужен, чтобы было что откатывать."""
+
+    def test_roundtrip(self):
+        from core import ActionLogEntry, append_action_log, read_action_log
+
+        entry = ActionLogEntry(
+            ts="2026-08-21T16:00:00", action="ban", user_id=777, user_name="Цель",
+            chat_id=-1001, chat_title="Чат", ok=True, note="Удалён и забанен",
+        )
+        assert append_action_log([entry], session="журнал-тест") == 1
+        rows = read_action_log(session="журнал-тест")
+        assert len(rows) == 1
+        assert rows[0].to_dict() == entry.to_dict()
+
+    def test_missing_file_is_empty_not_an_error(self):
+        from core import read_action_log
+        assert read_action_log(session="такого-нет") == []
+
+    def test_broken_lines_are_skipped(self):
+        from core import ActionLogEntry, action_log_path, append_action_log, read_action_log
+
+        append_action_log([ActionLogEntry(
+            ts="2026-08-21T16:00:00", action="ban", user_id=1, user_name="A",
+            chat_id=-1, chat_title="Ч", ok=True,
+        )], session="битый")
+        with open(action_log_path("битый"), "a", encoding="utf-8") as f:
+            f.write("это не json\n")
+            f.write('{"action": "ban"}\n')          # без обязательных полей
+            f.write("\n")
+        rows = read_action_log(session="битый")
+        assert len(rows) == 1
+
+    def test_nothing_to_write_is_not_a_file(self):
+        from core import action_log_path, append_action_log
+        assert append_action_log([], session="пусто") == 0
+        assert not os.path.isfile(action_log_path("пусто"))
+
+    def test_when_is_human_readable(self):
+        from core import ActionLogEntry
+        entry = ActionLogEntry(ts="2026-08-21T16:04:05", action="ban", user_id=1,
+                               user_name="A", chat_id=-1, chat_title="Ч", ok=True)
+        assert entry.when == "2026-08-21 16:04"
+        broken = ActionLogEntry(ts="вчера", action="ban", user_id=1, user_name="A",
+                                chat_id=-1, chat_title="Ч", ok=True)
+        assert broken.when == "вчера"
+
+    def test_clear_removes_the_file(self):
+        from core import ActionLogEntry, action_log_path, append_action_log, clear_action_log
+
+        append_action_log([ActionLogEntry(
+            ts="2026-08-21T16:00:00", action="ban", user_id=1, user_name="A",
+            chat_id=-1, chat_title="Ч", ok=True,
+        )], session="стереть")
+        assert os.path.isfile(action_log_path("стереть"))
+        assert clear_action_log(session="стереть") is True
+        assert not os.path.isfile(action_log_path("стереть"))
+
+
+class TestPendingBans:
+    """Что именно предлагать к откату."""
+
+    @staticmethod
+    def _write(session, rows):
+        from core import ActionLogEntry, append_action_log
+        append_action_log([
+            ActionLogEntry(ts="2026-08-21T16:0%s:00" % i, action=a, user_id=u,
+                           user_name="U%s" % u, chat_id=c, chat_title="Чат %s" % c, ok=ok)
+            for i, (a, u, c, ok) in enumerate(rows)
+        ], session=session)
+
+    def test_ban_without_unban_is_pending(self):
+        from core import pending_bans
+        self._write("pb1", [("ban", 777, -1001, True)])
+        assert [e.chat_id for e in pending_bans(session="pb1")] == [-1001]
+
+    def test_unban_closes_it(self):
+        from core import pending_bans
+        self._write("pb2", [("ban", 777, -1001, True), ("unban", 777, -1001, True)])
+        assert pending_bans(session="pb2") == []
+
+    def test_reban_reopens_it(self):
+        from core import pending_bans
+        self._write("pb3", [("ban", 777, -1001, True), ("unban", 777, -1001, True),
+                            ("ban", 777, -1001, True)])
+        assert [e.chat_id for e in pending_bans(session="pb3")] == [-1001]
+
+    def test_kick_is_not_a_ban(self):
+        from core import pending_bans
+        self._write("pb4", [("kick", 777, -1001, True)])
+        assert pending_bans(session="pb4") == []
+
+    def test_failed_ban_is_not_pending(self):
+        from core import pending_bans
+        self._write("pb5", [("ban", 777, -1001, False)])
+        assert pending_bans(session="pb5") == []
+
+    def test_filtered_by_user(self):
+        from core import pending_bans
+        self._write("pb6", [("ban", 777, -1001, True), ("ban", 888, -1002, True)])
+        assert [e.chat_id for e in pending_bans(user_id=888, session="pb6")] == [-1002]
+        assert len(pending_bans(session="pb6")) == 2
+
+    def test_chats_are_independent(self):
+        from core import pending_bans
+        self._write("pb7", [("ban", 777, -1001, True), ("ban", 777, -1002, True),
+                            ("unban", 777, -1001, True)])
+        assert [e.chat_id for e in pending_bans(session="pb7")] == [-1002]
+
+
+class TestOperationsWriteTheJournal:
+    """Операции обязаны оставлять след — иначе откатывать нечего."""
+
+    @pytest.mark.asyncio
+    async def test_ban_is_recorded(self, no_member_delays, monkeypatch):
+        import core
+        from core import remove_user_from_chats, set_app, set_me_from_dict, pending_bans
+
+        monkeypatch.setattr(core, "get_cache_session_key", lambda: "запись-бана")
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def ban_chat_member(self, cid, uid):
+                pass
+
+        set_app(FakeClient())
+        try:
+            await remove_user_from_chats(777, [(-1001234567890, "Супергруппа")], ban=True)
+        finally:
+            set_app(None)
+
+        rows = pending_bans(session="запись-бана")
+        assert [(e.chat_id, e.action, e.user_id) for e in rows] == [(-1001234567890, "ban", 777)]
+
+    @pytest.mark.asyncio
+    async def test_kick_is_recorded_but_not_pending(self, no_member_delays, monkeypatch):
+        import core
+        from core import remove_user_from_chats, set_app, set_me_from_dict, read_action_log, pending_bans
+
+        monkeypatch.setattr(core, "get_cache_session_key", lambda: "запись-кика")
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def ban_chat_member(self, cid, uid):
+                pass
+
+            async def unban_chat_member(self, cid, uid):
+                pass
+
+        set_app(FakeClient())
+        try:
+            await remove_user_from_chats(777, [(-1001234567890, "Супергруппа")], ban=False)
+        finally:
+            set_app(None)
+
+        assert [e.action for e in read_action_log(session="запись-кика")] == ["kick"]
+        assert pending_bans(session="запись-кика") == []
+
+    @pytest.mark.asyncio
+    async def test_add_is_recorded(self, no_member_delays, monkeypatch):
+        import core
+        from core import add_user_to_chats, set_app, set_me_from_dict, read_action_log
+
+        monkeypatch.setattr(core, "get_cache_session_key", lambda: "запись-добавления")
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def add_chat_members(self, cid, uid):
+                pass
+
+        set_app(FakeClient())
+        try:
+            await add_user_to_chats(777, [(-1001, "Чат")])
+        finally:
+            set_app(None)
+
+        assert [e.action for e in read_action_log(session="запись-добавления")] == ["add"]
+
+
+class TestUnbanUserInChats:
+    """Сам откат."""
+
+    @pytest.mark.asyncio
+    async def test_unbans_supergroups(self, no_member_delays, monkeypatch):
+        import core
+        from core import unban_user_in_chats, set_app, set_me_from_dict
+
+        monkeypatch.setattr(core, "get_cache_session_key", lambda: "откат")
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            def __init__(self):
+                self.unbanned = []
+
+            async def unban_chat_member(self, cid, uid):
+                self.unbanned.append(cid)
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await unban_user_in_chats(777, [(-1001234567890, "Супергруппа")])
+        finally:
+            set_app(None)
+
+        assert client.unbanned == [-1001234567890]
+        assert results[0].ok is True and results[0].note == "Бан снят"
+
+    @pytest.mark.asyncio
+    async def test_basic_group_has_no_ban_to_lift(self, no_member_delays, monkeypatch):
+        import core
+        from core import unban_user_in_chats, set_app, set_me_from_dict
+
+        monkeypatch.setattr(core, "get_cache_session_key", lambda: "откат-группа")
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            def __init__(self):
+                self.unbanned = []
+
+            async def unban_chat_member(self, cid, uid):
+                self.unbanned.append(cid)
+
+        client = FakeClient()
+        set_app(client)
+        try:
+            results = await unban_user_in_chats(777, [(-4614472266, "Обычная группа")])
+        finally:
+            set_app(None)
+
+        assert client.unbanned == []
+        assert results[0].ok is False
+        assert "пригласите заново" in results[0].note
+
+    @pytest.mark.asyncio
+    async def test_unban_closes_the_pending_ban(self, no_member_delays, monkeypatch):
+        import core
+        from core import remove_user_from_chats, unban_user_in_chats, set_app, set_me_from_dict, pending_bans
+
+        monkeypatch.setattr(core, "get_cache_session_key", lambda: "цикл")
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def ban_chat_member(self, cid, uid):
+                pass
+
+            async def unban_chat_member(self, cid, uid):
+                pass
+
+        set_app(FakeClient())
+        try:
+            await remove_user_from_chats(777, [(-1001234567890, "Супергруппа")], ban=True)
+            assert len(pending_bans(session="цикл")) == 1
+            await unban_user_in_chats(777, [(-1001234567890, "Супергруппа")])
+        finally:
+            set_app(None)
+
+        assert pending_bans(session="цикл") == []
+
+    @pytest.mark.asyncio
+    async def test_error_is_reported_per_chat(self, no_member_delays, monkeypatch):
+        import core
+        from core import unban_user_in_chats, set_app, set_me_from_dict
+
+        monkeypatch.setattr(core, "get_cache_session_key", lambda: "откат-ошибка")
+        set_me_from_dict({"id": 1, "username": "me"})
+
+        class FakeClient:
+            async def unban_chat_member(self, cid, uid):
+                raise ChatAdminRequired("[400 CHAT_ADMIN_REQUIRED]")
+
+        set_app(FakeClient())
+        try:
+            results = await unban_user_in_chats(777, [(-1001234567890, "Супергруппа")])
+        finally:
+            set_app(None)
+
+        assert results[0].ok is False
+        assert results[0].note == "Нужны права администратора"
+
+    @pytest.mark.asyncio
+    async def test_empty_selection_is_rejected(self, no_member_delays):
+        from core import unban_user_in_chats, set_app, set_me_from_dict
+
+        set_me_from_dict({"id": 1, "username": "me"})
+        set_app(object())
+        try:
+            with pytest.raises(ValueError):
+                await unban_user_in_chats(777, [])
+        finally:
+            set_app(None)

@@ -41,6 +41,7 @@ from core import (
     remove_user_from_chats,
     add_user_to_chats,
     find_chat_admins,
+    unban_user_in_chats,
     get_scan_delay_between_chats,
     get_export_parallel_chats,
     get_export_include_media,
@@ -419,6 +420,35 @@ def worker_loop():
                                     stopped=stop_ev is not None and stop_ev.is_set(),
                                 ))
                                 log.debug("worker: put admins_done, людей=%s", len(admins))
+                            elif req[0] == "unban_user_in_chats":
+                                user_id = req[1]
+                                chat_pairs = req[2]
+
+                                def on_unban_progress(i, total, result):
+                                    response_queue.put(MemberActionProgressMsg(
+                                        action="unban", current=i, total=total, result=result,
+                                    ))
+
+                                def on_unban_flood(seconds):
+                                    response_queue.put(FloodWaitMsg(seconds=seconds, operation=req[0]))
+
+                                try:
+                                    unban_results = await unban_user_in_chats(
+                                        user_id, chat_pairs,
+                                        pause_event=scan_paused, stop_event=scan_stop_requested,
+                                        progress_callback=on_unban_progress,
+                                        flood_callback=on_unban_flood,
+                                    )
+                                except Exception as unban_err:
+                                    log.exception("worker: unban failed: %s", unban_err)
+                                    response_queue.put(ErrorMsg(operation=req[0], error=str(unban_err)))
+                                    unban_results = []
+                                response_queue.put(MemberActionDoneMsg(
+                                    action="unban",
+                                    results=unban_results,
+                                    stopped=scan_stop_requested.is_set(),
+                                ))
+                                log.debug("worker: put member_action_done unban, chats=%s", len(unban_results))
                             elif req[0] in ("remove_user_from_chats", "add_user_to_chats"):
                                 action = "remove" if req[0] == "remove_user_from_chats" else "add"
                                 user_id = req[1]

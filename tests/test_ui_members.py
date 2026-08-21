@@ -34,15 +34,17 @@ from core import MemberActionResult, MemberChat, Place, TargetUser, _fill_member
 from ui.members_frame import (  # noqa: E402
     MODE_ADD,
     MODE_REMOVE,
+    MODE_UNBAN,
     OK_COLOR,
     FAIL_COLOR,
     SCOPE_DEEP,
+    BULK_THRESHOLD,
     MemberRow,
     MembersFrame,
     _shorten,
 )
 from ui.theme import TEXT_MUTED  # noqa: E402
-from tests.conftest import FakeMessagebox  # noqa: E402
+from tests.conftest import FakeConfirm, FakeMessagebox  # noqa: E402
 
 
 class Recorder:
@@ -55,6 +57,7 @@ class Recorder:
         self.remove = []
         self.add = []
         self.admins = []
+        self.unban = []
 
 
 def make_chat(chat_id, title, type_str="Супергруппа", my="owner", target="member", can_manage=True):
@@ -79,6 +82,8 @@ def frame(gui_root, monkeypatch):
     scan_stop_requested.clear()
     box = FakeMessagebox()
     monkeypatch.setattr(members_frame, "messagebox", box)
+    confirm = FakeConfirm()
+    monkeypatch.setattr(members_frame, "confirm_action", confirm)
     rec = Recorder()
     f = MembersFrame(
         gui_root,
@@ -88,11 +93,13 @@ def frame(gui_root, monkeypatch):
         on_remove=lambda *a: rec.remove.append(a),
         on_add=lambda *a: rec.add.append(a),
         on_find_admins=lambda *a: rec.admins.append(a),
+        on_unban=lambda *a: rec.unban.append(a),
     )
     f.pack(fill="both", expand=True)
     gui_root.update()
     f.rec = rec
     f.box = box
+    f.confirm = confirm
     try:
         yield f
     finally:
@@ -339,11 +346,11 @@ class TestOperations:
         frame.set_user(TARGET)
         frame.scope_var.set(SCOPE_DEEP)
         frame._find_chats()
-        assert frame.box.kinds() == ["ask"]
+        assert len(frame.confirm.calls) == 1
         assert frame.rec.find == [(777, True, True, True)]
 
     def test_declined_deep_scope_does_nothing(self, frame):
-        frame.box.answer = False
+        frame.confirm.answer = False
         frame.set_user(TARGET)
         frame.scope_var.set(SCOPE_DEEP)
         frame._find_chats()
@@ -363,12 +370,38 @@ class TestOperations:
         assert frame.rec.remove[0][2] is False
 
     def test_remove_needs_confirmation(self, frame):
-        frame.box.answer = False
+        frame.confirm.answer = False
         frame.set_user(TARGET)
         frame.finish_find_chats([make_chat(-1001, "Мой чат")], stopped=False)
         frame._remove_selected()
         assert frame.rec.remove == []
-        assert frame.box.kinds() == ["ask"]
+        assert len(frame.confirm.calls) == 1
+
+    def test_confirmation_lists_the_chats_and_demands_an_ack(self, frame):
+        frame.set_user(TARGET)
+        frame.finish_find_chats([make_chat(-1001, "Мой чат")], stopped=False)
+        frame._remove_selected()
+        call = frame.confirm.calls[0]
+        assert call["items"] == ["Мой чат"]
+        assert call["danger"] is True
+        # Бан необратим на глаз — просто «ок» мало.
+        assert call["ack_text"]
+
+    def test_kick_without_ban_needs_no_ack_for_a_single_chat(self, frame):
+        frame.set_user(TARGET)
+        frame.finish_find_chats([make_chat(-1001, "Мой чат")], stopped=False)
+        frame.ban_var.set(False)
+        frame._remove_selected()
+        assert frame.confirm.calls[0]["ack_text"] is None
+
+    def test_bulk_kick_still_needs_an_ack(self, frame):
+        frame.set_user(TARGET)
+        frame.finish_find_chats(
+            [make_chat(-1000 - i, "Чат %s" % i) for i in range(BULK_THRESHOLD + 1)], stopped=False
+        )
+        frame.ban_var.set(False)
+        frame._remove_selected()
+        assert frame.confirm.calls[0]["ack_text"]
 
     def test_remove_with_nothing_ticked_is_refused(self, frame):
         frame.set_user(TARGET)
@@ -389,10 +422,21 @@ class TestOperations:
     def test_progress_updates_bar_and_status(self, frame):
         frame.set_user(TARGET)
         frame.finish_find_chats([make_chat(-1001, "Мой чат")], stopped=False)
+        frame._start_action("Удаляю", 2)
         frame.update_action_progress("remove", 1, 2, MemberActionResult(-1001, "Мой чат", True, "Удалён и забанен"))
         frame.update()
-        assert frame.action_progress.get() == pytest.approx(0.5)
-        assert "1/2" in frame.status_label.cget("text")
+        assert frame.progress.bar.get() == pytest.approx(0.5)
+        assert frame.progress.counter_label.cget("text") == "1 / 2"
+        assert "Удалён и забанен" in frame.progress.detail_label.cget("text")
+
+    def test_incoming_rows_replace_the_empty_placeholder(self, frame):
+        # Раньше «Список пуст» оставался висеть над приходящими строками.
+        frame.set_user(TARGET)
+        frame.add_found_chat(make_chat(-1001, "Первый"))
+        frame.update()
+        leftovers = [w for w in frame.scroll.winfo_children() if not isinstance(w, MemberRow)]
+        assert frame._rendered_count() == 1
+        assert leftovers == []
 
     def test_successful_removals_leave_the_list(self, frame):
         frame.set_user(TARGET)
@@ -500,8 +544,8 @@ class TestReset:
         frame.reset()
         frame.update()
         assert frame.target is None
-        assert frame._items == {MODE_REMOVE: [], MODE_ADD: []}
-        assert frame._selected == {MODE_REMOVE: set(), MODE_ADD: set()}
+        assert all(not items for items in frame._items.values())
+        assert all(not chosen for chosen in frame._selected.values())
         assert frame._rendered_count() == 0
         assert frame.find_chats_btn.cget("state") == "disabled"
 
@@ -549,8 +593,10 @@ class TestAdminLookup:
         frame.set_busy(False)
 
     def test_progress_text(self, frame):
+        frame.progress.start("Ищу админов", total=40)
         frame.update_admins_progress(3, 40, "ДИТ. WAF - КППМ")
-        assert "3/40" in frame.status_label.cget("text")
+        assert frame.progress.counter_label.cget("text") == "3 / 40"
+        assert "КППМ" in frame.progress.detail_label.cget("text")
 
     def test_finish_opens_the_dialog_and_frees_the_screen(self, frame, monkeypatch):
         import ui.members_frame as members_frame
@@ -573,3 +619,126 @@ class TestAdminLookup:
         assert opened["chats_count"] == 2
         assert frame._busy is False
         assert "2" in frame.status_label.cget("text")
+
+
+class TestUnbanMode:
+    """Третий режим: откат собственных банов по журналу."""
+
+    @staticmethod
+    def _entry(chat_id, title, user_name="Иван Петров", ts="2026-08-21T16:00:00"):
+        from core import ActionLogEntry
+        return ActionLogEntry(ts=ts, action="ban", user_id=777, user_name=user_name,
+                              chat_id=chat_id, chat_title=title, ok=True, note="Удалён и забанен")
+
+    def _switch(self, frame):
+        frame.mode_switch.set(MODE_UNBAN)
+        frame._on_mode_change(MODE_UNBAN)
+
+    def test_journal_entries_become_rows(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        monkeypatch.setattr(members_frame, "pending_bans",
+                            lambda uid=None: [self._entry(-1001234567890, "Супергруппа")])
+        frame.set_user(TARGET)
+        self._switch(frame)
+        frame.load_pending_bans()
+        frame.update()
+        assert frame._rendered_count() == 1
+        item = frame._items[MODE_UNBAN][0]
+        assert item.title == "Супергруппа"
+        assert item.type_str == "Супергруппа"
+        assert "забанен 2026-08-21 16:00" in item.note
+        # Всё отмечено сразу: пришли сюда именно чтобы откатить.
+        assert frame._selected[MODE_UNBAN] == {-1001234567890}
+
+    def test_basic_group_is_labelled_as_such(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        monkeypatch.setattr(members_frame, "pending_bans",
+                            lambda uid=None: [self._entry(-4614472266, "Обычная группа")])
+        frame.set_user(TARGET)
+        self._switch(frame)
+        frame.load_pending_bans()
+        assert frame._items[MODE_UNBAN][0].type_str == "Группа"
+
+    def test_without_a_user_the_rows_name_who_was_banned(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        seen = []
+
+        def fake(uid=None):
+            seen.append(uid)
+            return [self._entry(-1001, "Чат", user_name="Майя Саакова")]
+
+        monkeypatch.setattr(members_frame, "pending_bans", fake)
+        self._switch(frame)
+        frame.load_pending_bans()
+        assert seen == [None]
+        assert frame._items[MODE_UNBAN][0].note.startswith("Майя Саакова · ")
+
+    def test_empty_journal_says_so(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        monkeypatch.setattr(members_frame, "pending_bans", lambda uid=None: [])
+        frame.set_user(TARGET)
+        self._switch(frame)
+        frame.load_pending_bans()
+        assert "нет" in frame.status_label.cget("text").lower()
+        assert frame._rendered_count() == 0
+
+    def test_broken_journal_does_not_crash_the_screen(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        def boom(uid=None):
+            raise OSError("файл занят")
+
+        monkeypatch.setattr(members_frame, "pending_bans", boom)
+        self._switch(frame)
+        frame.load_pending_bans()
+        assert frame._items[MODE_UNBAN] == []
+
+    def test_unban_sends_the_selection(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        monkeypatch.setattr(members_frame, "pending_bans",
+                            lambda uid=None: [self._entry(-1001234567890, "Супергруппа")])
+        frame.set_user(TARGET)
+        self._switch(frame)
+        frame.load_pending_bans()
+        frame._unban_selected()
+        assert frame.rec.unban == [(777, [(-1001234567890, "Супергруппа")])]
+        assert frame.confirm.calls[0]["items"] == ["Супергруппа"]
+
+    def test_unban_needs_a_user(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+
+        monkeypatch.setattr(members_frame, "pending_bans",
+                            lambda uid=None: [self._entry(-1001, "Чат")])
+        self._switch(frame)
+        frame.load_pending_bans()
+        frame._unban_selected()
+        assert frame.rec.unban == []
+        assert frame.box.kinds() == ["info"]
+
+    def test_successful_unban_leaves_the_list(self, frame, monkeypatch):
+        import ui.members_frame as members_frame
+        from core import MemberActionResult
+
+        monkeypatch.setattr(members_frame, "pending_bans", lambda uid=None: [
+            self._entry(-1001234567890, "Снят"), self._entry(-1002222222222, "Остался"),
+        ])
+        frame.set_user(TARGET)
+        self._switch(frame)
+        frame.load_pending_bans()
+        frame.finish_action("unban", [
+            MemberActionResult(-1001234567890, "Снят", True, "Бан снят"),
+            MemberActionResult(-1002222222222, "Остался", False, "Нужны права администратора"),
+        ], stopped=False)
+        frame.update()
+        assert [i.chat_id for i in frame._items[MODE_UNBAN]] == [-1002222222222]
+
+    def test_button_order_for_the_mode(self, frame):
+        self._switch(frame)
+        packed = list(frame.actions.pack_slaves())
+        assert frame.load_bans_btn in packed and frame.unban_btn in packed
+        assert frame.find_chats_btn not in packed and frame.add_btn not in packed

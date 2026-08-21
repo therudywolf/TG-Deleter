@@ -164,6 +164,7 @@ class App:
             on_remove=self._on_remove_user_from_chats,
             on_add=self._on_add_user_to_chats,
             on_find_admins=self._on_find_chat_admins,
+            on_unban=self._on_unban_user_in_chats,
         )
 
         self._log_visible = False
@@ -530,6 +531,11 @@ class App:
             return
         request_queue.put(("add_user_to_chats", user_id, chat_pairs))
 
+    def _on_unban_user_in_chats(self, user_id, chat_pairs):
+        if not self._member_op_ready():
+            return
+        request_queue.put(("unban_user_in_chats", user_id, chat_pairs))
+
     def _on_find_chat_admins(self, chat_pairs, target_user_id):
         if not self._member_op_ready():
             return
@@ -895,13 +901,7 @@ class App:
         self.members_frame.set_user(msg.user)
 
     def _handle_member_chats_progress(self, msg):
-        # n=0 — это сообщение о самом этапе поиска, а не о конкретном чате.
-        if not msg.n:
-            self.members_frame.status_label.configure(text=msg.title or "Ищу чаты…")
-            return
-        short = (msg.title[:40] + "…") if len(msg.title or "") > 40 else (msg.title or "")
-        counter = "%s/%s" % (msg.n, msg.total) if msg.total else str(msg.n)
-        self.members_frame.status_label.configure(text="Проверено чатов: %s. Сейчас: %s" % (counter, short))
+        self.members_frame.update_search_progress(msg.n, msg.total, msg.title)
 
     def _handle_member_chat_found(self, msg):
         self.members_frame.add_found_chat(msg.chat)
@@ -912,8 +912,7 @@ class App:
         self.members_frame.finish_find_chats(msg.chats, msg.stopped)
 
     def _handle_member_dialogs_progress(self, msg):
-        short = (msg.title[:40] + "…") if len(msg.title or "") > 40 else (msg.title or "")
-        self.members_frame.status_label.configure(text="Загружено чатов: %s. Текущий: %s" % (msg.n, short))
+        self.members_frame.update_dialogs_progress(msg.n, msg.title)
 
     def _handle_member_dialogs_batch(self, msg):
         self.members_frame.append_dialogs(msg.batch)
@@ -965,7 +964,7 @@ class App:
             self.members_frame.set_user_error(err)
             return
         if op in ("find_user_chats", "list_member_chats", "remove_user_from_chats",
-                  "add_user_to_chats", "find_chat_admins"):
+                  "add_user_to_chats", "find_chat_admins", "unban_user_in_chats"):
             self.members_frame.set_busy(False)
             self.members_frame.status_label.configure(text="Ошибка: %s" % err)
         self._operation_running = False
